@@ -1,0 +1,2458 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <title>바른분리 · 분리배출 품목 검색기</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="recycle.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="top">
+        <div class="brand">
+          <span class="mark"
+            ><i style="background: var(--c-recycle)"></i
+            ><i style="background: var(--c-general)"></i
+            ><i style="background: var(--c-food)"></i
+            ><i style="background: var(--c-special)"></i></span
+          >바른분리
+        </div>
+        <button class="chip" data-act="region" aria-label="지역 선택">
+          지역 <b id="regionName"></b>
+        </button>
+      </header>
+      <main id="view"></main>
+      <footer class="foot">
+        <div class="fb">
+          <span class="mark"
+            ><i style="background: var(--c-recycle)"></i
+            ><i style="background: var(--c-general)"></i
+            ><i style="background: var(--c-food)"></i
+            ><i style="background: var(--c-special)"></i></span
+          >바른분리 · 분리배출 품목 검색기
+        </div>
+        <p>
+          데이터 출처:
+          <a href="https://www.data.go.kr" target="_blank" rel="noopener"
+            >공공데이터포털</a
+          >의 행정안전부 생활쓰레기배출정보, 전국의류수거함표준데이터 · 지도:
+          NAVER Maps
+        </p>
+        <p>
+          배출 요일·방법은 같은 지자체 안에서도 동네마다 다를 수 있어요. 정확한
+          내용은 지자체 공지를 확인해 주세요. 일부 화면은 샘플 데이터를
+          포함해요.
+        </p>
+        <p>국립 군산대학교</p>
+      </footer>
+      <nav class="tabs" id="tabs"></nav>
+    </div>
+    <div class="sheetWrap hidden" id="sheetWrap" data-act="sheetBg">
+      <div class="sheet" id="sheet"></div>
+    </div>
+    <div id="toast" role="status"></div>
+
+    <script>
+      /* ===== 기본 유틸 ===== */
+      const $ = (s) => document.querySelector(s);
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const DAYS = ["일", "월", "화", "수", "목", "금", "토"];
+      const CAT = {
+        recycle: {
+          label: "재활용",
+          color: "var(--c-recycle)",
+          tint: "var(--t-recycle)",
+        },
+        general: {
+          label: "일반쓰레기",
+          color: "var(--c-general)",
+          tint: "var(--t-general)",
+        },
+        food: {
+          label: "음식물쓰레기",
+          color: "var(--c-food)",
+          tint: "var(--t-food)",
+        },
+        special: {
+          label: "특수 배출",
+          color: "var(--c-special)",
+          tint: "var(--t-special)",
+        },
+      };
+      const PT_TYPES = {
+        clothes: { label: "의류 수거함", color: "#C9305F" },
+        appliance: { label: "소형가전 수거함", color: "#1F6FD8" },
+        battery: { label: "종이팩·폐건전지 교환처", color: "#A96500" },
+      };
+      let toastT;
+      function toast(m) {
+        const t = $("#toast");
+        t.textContent = m;
+        t.classList.add("show");
+        clearTimeout(toastT);
+        toastT = setTimeout(() => t.classList.remove("show"), 3800);
+      }
+      const shuffle = (a) => {
+        a = [...a];
+        for (let i = a.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+      };
+      const fmtDate = (ts) => {
+        const d = new Date(ts);
+        return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      function km(a, b) {
+        const R = 6371,
+          r = (x) => (x * Math.PI) / 180,
+          dl = r(b.lat - a.lat),
+          dn = r(b.lng - a.lng);
+        const h =
+          Math.sin(dl / 2) ** 2 +
+          Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dn / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(h));
+      }
+
+      /* ===== 저장소 (localStorage 대신 window.storage, 실패 시 메모리) ===== */
+      const mem = {};
+      const store = {
+        async get(k) {
+          try {
+            if (window.storage) {
+              const r = await window.storage.get(k);
+              if (r && r.value) return JSON.parse(r.value);
+            } else {
+              const v = localStorage.getItem(k);
+              if (v) return JSON.parse(v);
+            }
+          } catch (e) {}
+          return mem[k] ?? null;
+        },
+        async set(k, v) {
+          mem[k] = v;
+          try {
+            if (window.storage) await window.storage.set(k, JSON.stringify(v));
+            else localStorage.setItem(k, JSON.stringify(v));
+          } catch (e) {}
+        },
+      };
+
+      /* ===== 샘플 데이터 (관리자 화면에서 실제 지침으로 교체) ===== */
+      const ITEM_SEED = [
+        [
+          "pet",
+          "페트병",
+          ["페트", "생수병", "음료수병", "물병", "투명 페트병"],
+          "recycle",
+          "PET",
+          [
+            "내용물을 비우고 물로 헹구기",
+            "라벨을 떼어내기",
+            "찌그러뜨린 뒤 뚜껑을 닫아 배출하기",
+          ],
+          [
+            "이물질이 지워지지 않으면 일반쓰레기로 버리세요",
+            "색이 있는 페트병은 지자체에 따라 분류가 달라요",
+          ],
+          "ta",
+        ],
+        [
+          "hetbahn",
+          "햇반 용기",
+          ["즉석밥 용기", "햇반", "즉석밥", "전자레인지 용기"],
+          "recycle",
+          "PP(플라스틱)",
+          [
+            "남은 밥알을 털고 물로 헹구기",
+            "겉면 종이 띠지와 비닐 필름 떼기",
+            "플라스틱류로 배출하기",
+          ],
+          [
+            "이물질이 지워지지 않으면 일반쓰레기로 버리세요",
+            "오염된 비닐 필름은 일반쓰레기예요",
+          ],
+          "ta",
+        ],
+        [
+          "can",
+          "음료수 캔",
+          ["알루미늄캔", "콜라캔", "맥주캔", "캔"],
+          "recycle",
+          "Can(알루미늄)",
+          [
+            "내용물을 비우고 헹구기",
+            "담배꽁초 같은 이물질 넣지 않기",
+            "가능하면 찌그러뜨려 캔류로 배출하기",
+          ],
+          ["담배꽁초가 들어간 캔은 재활용이 어려워요"],
+          "",
+        ],
+        [
+          "tuna",
+          "참치캔·통조림",
+          ["참치캔", "통조림", "스팸캔", "통조림캔"],
+          "recycle",
+          "Can(철)",
+          [
+            "내용물과 기름을 비우기",
+            "물로 헹궈 기름기 없애기",
+            "뚜껑을 캔에 끼우거나 함께 모아 캔류로 배출하기",
+          ],
+          ["기름기가 남으면 재활용이 어려워요"],
+          "t",
+        ],
+        [
+          "gas",
+          "부탄가스·스프레이",
+          ["부탄가스", "스프레이", "살충제 캔", "에어로졸"],
+          "recycle",
+          "Can(가스용기)",
+          [
+            "통풍이 잘되는 야외에서 내용물을 모두 비우기",
+            "플라스틱 뚜껑과 노즐 분리하기",
+            "캔류로 배출하기",
+          ],
+          [
+            "내용물이 남아 있으면 폭발 위험이 있어요",
+            "구멍을 뚫으라는 지자체와 뚫지 말라는 지자체가 있어 확인이 필요해요",
+          ],
+          "t",
+        ],
+        [
+          "glass",
+          "유리병",
+          ["소주병", "맥주병", "와인병", "잼병", "음료병"],
+          "recycle",
+          "Glass",
+          [
+            "내용물을 비우고 헹구기",
+            "금속 뚜껑과 라벨 분리하기",
+            "유리병 수거함에 배출하기",
+          ],
+          [
+            "깨진 유리·도자기·거울은 재활용이 안 돼요(일반쓰레기)",
+            "보증금 병은 소매점에 반납하면 보증금을 돌려받아요",
+          ],
+          "t",
+        ],
+        [
+          "broken",
+          "깨진 유리·도자기",
+          ["깨진 컵", "깨진 접시", "도자기", "그릇", "거울", "사기그릇"],
+          "general",
+          "Ceramic/Glass",
+          [
+            "신문지로 두껍게 감싸 날카로운 면 가리기",
+            "종량제 봉투(또는 지자체 지정 마대)에 담기",
+            "일반쓰레기로 배출하기",
+          ],
+          ["맨손으로 만지면 다쳐요", "불연성 마대를 쓰는 지자체가 있어요"],
+          "t",
+        ],
+        [
+          "papercup",
+          "종이컵",
+          ["일회용 종이컵", "카페컵", "커피컵"],
+          "recycle",
+          "Paper cup",
+          [
+            "남은 음료를 비우고 헹구기",
+            "컵 홀더와 뚜껑 떼기",
+            "종이컵끼리 모아 종이팩·종이컵 수거함에 배출하기",
+          ],
+          [
+            "오염되거나 헹구지 못한 컵은 일반쓰레기예요",
+            "종이컵을 일반 종이류에 섞으면 재활용이 어려워요",
+          ],
+          "ta",
+        ],
+        [
+          "milk",
+          "우유팩·종이팩",
+          ["우유팩", "두유팩", "멸균팩", "주스팩"],
+          "recycle",
+          "Paper pack",
+          [
+            "내용물을 비우고 물로 헹구기",
+            "빨대·비닐 떼고 펼쳐서 말리기",
+            "종이팩 전용 수거함이나 주민센터 교환처에 배출하기",
+          ],
+          ["멸균팩은 일반 종이팩과 따로 모아 주세요"],
+          "t",
+        ],
+        [
+          "box",
+          "택배 상자",
+          ["골판지", "박스", "종이박스", "택배박스"],
+          "recycle",
+          "Paper(골판지)",
+          [
+            "테이프와 송장 스티커 떼기",
+            "상자를 펼쳐 납작하게 접기",
+            "끈으로 묶어 종이류로 배출하기",
+          ],
+          [
+            "음식물이 묻었거나 젖은 상자는 일반쓰레기예요",
+            "송장에는 개인정보가 있으니 지우거나 찢어서 버려요",
+          ],
+          "a",
+        ],
+        [
+          "book",
+          "책·신문",
+          ["신문", "책", "노트", "전단지", "복사지", "종이"],
+          "recycle",
+          "Paper",
+          [
+            "스프링·비닐 커버·테이프 떼기",
+            "물에 젖지 않게 모으기",
+            "묶어서 종이류로 배출하기",
+          ],
+          [
+            "코팅되거나 오염된 종이는 일반쓰레기예요",
+            "영수증(감열지)은 종이류가 아니에요",
+          ],
+          "a",
+        ],
+        [
+          "styro",
+          "스티로폼",
+          ["스티로폼 박스", "완충재", "아이스박스"],
+          "recycle",
+          "EPS",
+          [
+            "테이프와 송장 스티커 떼기",
+            "이물질을 씻어내기",
+            "스티로폼류로 배출하기",
+          ],
+          ["색이 있거나 음식물이 묻은 스티로폼은 일반쓰레기예요"],
+          "ta",
+        ],
+        [
+          "vinyl",
+          "비닐봉지·포장 비닐",
+          ["비닐", "과자봉지", "라면봉지", "비닐류", "포장지"],
+          "recycle",
+          "Vinyl",
+          [
+            "내용물을 비우고 이물질 털기",
+            "양념이 묻었다면 헹구기",
+            "투명 봉투에 모아 비닐류로 배출하기",
+          ],
+          ["이물질이 지워지지 않으면 일반쓰레기로 버리세요"],
+          "ta",
+        ],
+        [
+          "delivery",
+          "배달 음식 용기",
+          ["배달용기", "플라스틱 용기", "도시락 용기", "일회용기", "포장용기"],
+          "recycle",
+          "PP/PS(플라스틱)",
+          [
+            "음식물을 남김없이 비우기",
+            "기름기와 양념을 헹구기",
+            "뚜껑과 비닐을 분리해 플라스틱류로 배출하기",
+          ],
+          [
+            "양념·기름이 지워지지 않으면 일반쓰레기로 버리세요",
+            "검은색 용기는 선별이 어려워 일반쓰레기로 안내하는 곳이 있어요",
+          ],
+          "ta",
+        ],
+        [
+          "cafecup",
+          "일회용 플라스틱컵",
+          ["카페 플라스틱컵", "아이스컵", "투명컵", "테이크아웃 컵", "빨대"],
+          "recycle",
+          "PET/PP",
+          [
+            "남은 음료와 얼음 비우기",
+            "헹군 뒤 빨대와 뚜껑 분리하기",
+            "컵은 플라스틱류로 배출하기",
+          ],
+          [
+            "빨대와 스티로폼 뚜껑은 일반쓰레기예요",
+            "음료 찌꺼기가 남으면 재활용이 어려워요",
+          ],
+          "ta",
+        ],
+        [
+          "cosmetic",
+          "화장품·세제 용기",
+          ["로션통", "샴푸통", "린스통", "세제통", "펌프"],
+          "recycle",
+          "PE/PP",
+          [
+            "내용물을 끝까지 비우기",
+            "물로 헹구기",
+            "펌프 등 다른 재질을 분리해 플라스틱류로 배출하기",
+          ],
+          [
+            "펌프·스프링 같은 복합재질은 일반쓰레기예요",
+            "유리 화장품 용기는 재활용이 안 돼 일반쓰레기예요",
+          ],
+          "t",
+        ],
+        [
+          "chicken",
+          "치킨 뼈",
+          ["닭뼈", "갈비뼈", "생선뼈", "돼지뼈", "뼈다귀"],
+          "general",
+          "Bone",
+          [
+            "남은 살과 양념 정리하기",
+            "물기를 빼기",
+            "종량제 봉투에 담아 배출하기",
+          ],
+          [
+            "뼈는 딱딱해서 음식물쓰레기가 아니에요",
+            "생선 가시도 일반쓰레기예요",
+          ],
+          "t",
+        ],
+        [
+          "peel",
+          "과일·채소 껍질",
+          ["귤껍질", "바나나껍질", "사과껍질", "수박껍질", "채소 껍질"],
+          "food",
+          "Organic",
+          [
+            "스티커와 비닐 등 이물질 떼기",
+            "물기를 최대한 빼기",
+            "음식물 전용 용기에 배출하기",
+          ],
+          [
+            "파인애플·코코넛·밤·호두 껍데기는 일반쓰레기예요",
+            "양파·마늘·옥수수 껍질도 일반쓰레기예요",
+          ],
+          "t",
+        ],
+        [
+          "shell",
+          "계란·조개 껍데기",
+          ["달걀껍데기", "조개껍데기", "조개껍질", "굴껍데기"],
+          "general",
+          "Shell",
+          ["이물질을 털어내기", "물기 빼기", "종량제 봉투에 담아 배출하기"],
+          ["음식물쓰레기로 착각하기 쉽지만 일반쓰레기예요"],
+          "t",
+        ],
+        [
+          "leftover",
+          "남은 음식·국물",
+          ["잔반", "밥", "국", "찌개", "반찬", "음식물쓰레기"],
+          "food",
+          "Organic",
+          [
+            "국물은 체로 걸러 물기 최대한 빼기",
+            "이쑤시개·비닐·뼈 등 이물질 골라내기",
+            "음식물 전용 용기에 배출하기",
+          ],
+          [
+            "한약재 찌꺼기는 일반쓰레기예요",
+            "뼈와 큰 껍데기는 음식물쓰레기가 아니에요",
+          ],
+          "",
+        ],
+        [
+          "battery",
+          "폐건전지",
+          ["건전지", "배터리", "AA건전지", "단추전지", "보조배터리"],
+          "special",
+          "Battery",
+          [
+            "단자에 테이프를 붙여 절연하기",
+            "일반쓰레기와 섞지 않고 따로 모으기",
+            "주민센터·아파트 폐건전지 수거함에 배출하기",
+          ],
+          [
+            "일반쓰레기에 섞으면 화재 위험이 있어요",
+            "부풀어 오른 리튬이온 배터리는 지자체에 문의하세요",
+          ],
+          "t",
+        ],
+        [
+          "lamp",
+          "형광등·LED 전구",
+          ["형광등", "전구", "LED", "엘이디"],
+          "special",
+          "Lamp",
+          [
+            "깨지지 않게 원래 상자나 신문지로 감싸기",
+            "다른 쓰레기와 따로 모으기",
+            "전용 수거함(주민센터·아파트)에 배출하기",
+          ],
+          [
+            "깨진 형광등은 수은 위험이 있어 지자체 안내를 따라야 해요",
+            "백열전구는 일반쓰레기예요",
+          ],
+          "t",
+        ],
+        [
+          "cloth",
+          "헌 옷·신발",
+          ["옷", "의류", "신발", "가방", "헌옷", "이불"],
+          "special",
+          "Textile",
+          [
+            "깨끗이 세탁해서 말리기",
+            "봉투에 담아 묶기",
+            "의류 수거함에 배출하기",
+          ],
+          [
+            "젖거나 심하게 오염된 옷은 일반쓰레기예요",
+            "솜이불·베개는 지자체 규정(대형폐기물 등)을 확인하세요",
+          ],
+          "t",
+        ],
+        [
+          "appliance",
+          "소형 가전",
+          ["선풍기", "드라이기", "전기포트", "휴대폰", "충전기", "노트북"],
+          "special",
+          "E-waste",
+          [
+            "배터리를 분리하고 개인정보 지우기",
+            "전원 코드와 부속품 정리하기",
+            "소형가전 수거함이나 무상방문수거를 이용하기",
+          ],
+          ["대형 가전은 대형폐기물 신고나 무상방문수거를 이용해요"],
+          "t",
+        ],
+        [
+          "receipt",
+          "영수증·감열지",
+          ["감열지", "택배 송장", "영수증", "티켓"],
+          "general",
+          "Thermal paper",
+          [
+            "개인정보가 있는 부분은 찢거나 지우기",
+            "종이류와 섞지 않기",
+            "종량제 봉투에 배출하기",
+          ],
+          ["감열지는 종이류 재활용이 안 돼요"],
+          "t",
+        ],
+        [
+          "mixed",
+          "칫솔·볼펜·수세미",
+          ["칫솔", "볼펜", "샤프", "면도기", "라이터", "수세미", "고무장갑"],
+          "general",
+          "Mixed",
+          [
+            "재질이 섞였는지 확인하기",
+            "라이터는 가스를 모두 쓰기",
+            "종량제 봉투에 담아 배출하기",
+          ],
+          ["재질이 섞인 물건은 분리하기 어려워 재활용이 안 돼요"],
+          "",
+        ],
+        [
+          "mask",
+          "마스크·물티슈",
+          ["일회용 마스크", "KF94", "장갑", "물티슈", "기저귀"],
+          "general",
+          "Disposable",
+          [
+            "끈을 잘라 정리하기",
+            "다른 쓰레기와 섞이지 않게 봉투에 담기",
+            "종량제 봉투에 배출하기",
+          ],
+          ["물티슈는 변기에 버리면 안 돼요"],
+          "",
+        ],
+      ];
+      const mkSched = (r, g, f, t) => ({
+        recycle: { days: r, time: t },
+        general: { days: g, time: t },
+        food: { days: f, time: t },
+      });
+      const REGION_SEED = [
+        {
+          id: "gangnam",
+          name: "서울 강남구",
+          lat: 37.5172,
+          lng: 127.0473,
+          sched: mkSched([1, 4], [0, 2, 4], [1, 2, 3, 4, 5], "18:00~24:00"),
+          bag: "지자체 종량제 봉투(일반)에 담아 배출해요. 음식물은 전용 용기를 이용해요.",
+          note: "아파트 단지는 단지별 배출 요일이 따로 있을 수 있어요.",
+        },
+        {
+          id: "mapo",
+          name: "서울 마포구",
+          lat: 37.5663,
+          lng: 126.9019,
+          sched: mkSched(
+            [1, 3],
+            [1, 3, 5],
+            [0, 1, 2, 3, 4, 5, 6],
+            "19:00~24:00",
+          ),
+          bag: "지자체 종량제 봉투(일반)를 쓰고, 음식물은 종량기 또는 전용 용기를 이용해요.",
+          note: "배출 시간 외에는 내놓지 마세요.",
+        },
+        {
+          id: "bundang",
+          name: "경기 성남시 분당구",
+          lat: 37.3826,
+          lng: 127.1189,
+          sched: mkSched([2, 5], [1, 4], [1, 2, 3, 4, 5, 6], "18:00~24:00"),
+          bag: "성남시 종량제 봉투를 사용해요.",
+          note: "요일은 동별로 다를 수 있어요.",
+        },
+        {
+          id: "haeundae",
+          name: "부산 해운대구",
+          lat: 35.1631,
+          lng: 129.1639,
+          sched: mkSched(
+            [1, 4],
+            [0, 2, 5],
+            [0, 1, 2, 3, 4, 5, 6],
+            "19:00~24:00",
+          ),
+          bag: "해운대구 종량제 봉투를 사용해요.",
+          note: "해수욕장 주변은 별도 배출 안내가 있을 수 있어요.",
+        },
+        {
+          id: "cheongju",
+          name: "충북 청주시",
+          lat: 36.6424,
+          lng: 127.489,
+          sched: mkSched(
+            [1, 4],
+            [0, 2, 4],
+            [0, 1, 2, 3, 4, 5, 6],
+            "18:00~24:00",
+          ),
+          bag: "청주시 종량제 봉투를 사용해요. (샘플)",
+          note: "샘플 데이터예요. 요일은 동별로 다를 수 있어요.",
+        },
+        {
+          id: "suseong",
+          name: "대구 수성구",
+          lat: 35.8581,
+          lng: 128.6306,
+          sched: mkSched([3, 6], [1, 3, 5], [1, 2, 3, 4, 5], "18:00~24:00"),
+          bag: "수성구 종량제 봉투를 사용해요.",
+          note: "주택가와 아파트의 배출 요일이 다를 수 있어요.",
+        },
+      ];
+      const BARCODE_SEED = [
+        {
+          code: "8800000000011",
+          product: "즉석밥 210g (데모)",
+          material: "PP",
+          itemId: "hetbahn",
+        },
+        {
+          code: "8800000000028",
+          product: "생수 500ml (데모)",
+          material: "PET",
+          itemId: "pet",
+        },
+        {
+          code: "8800000000035",
+          product: "탄산음료 250ml 캔 (데모)",
+          material: "Can(알루미늄)",
+          itemId: "can",
+        },
+        {
+          code: "8800000000042",
+          product: "우유 1L 종이팩 (데모)",
+          material: "Paper pack",
+          itemId: "milk",
+        },
+        {
+          code: "8800000000059",
+          product: "참치 통조림 150g (데모)",
+          material: "Can(철)",
+          itemId: "tuna",
+        },
+        {
+          code: "8800000000066",
+          product: "소주 360ml (데모)",
+          material: "Glass",
+          itemId: "glass",
+        },
+      ];
+      function seedDB() {
+        const items = ITEM_SEED.map(
+          ([id, name, aliases, cat, material, steps, warns, fl]) => ({
+            id,
+            name,
+            aliases,
+            cat,
+            material,
+            steps,
+            warns,
+            tricky: fl.includes("t"),
+            alt: fl.includes("a"),
+          }),
+        );
+        const offs = [
+          [0.004, 0.003],
+          [-0.003, 0.006],
+          [0.002, -0.005],
+          [-0.005, -0.002],
+          [0.006, -0.001],
+          [-0.001, 0.005],
+        ];
+        const points = [];
+        let n = 0;
+        REGION_SEED.forEach((r) =>
+          Object.keys(PT_TYPES).forEach((t, i) => {
+            for (let j = 0; j < 2; j++) {
+              const o = offs[(i * 2 + j) % 6];
+              points.push({
+                id: "p" + n++,
+                region: r.id,
+                type: t,
+                name: `${r.name.split(" ").pop()} ${PT_TYPES[t].label} ${j + 1} (샘플)`,
+                lat: r.lat + o[0],
+                lng: r.lng + o[1],
+              });
+            }
+          }),
+        );
+        return {
+          items,
+          regions: JSON.parse(JSON.stringify(REGION_SEED)),
+          barcodes: BARCODE_SEED.map((b) => ({ ...b })),
+          points,
+        };
+      }
+
+      /* ===== 상태 ===== */
+      const S = {
+        tab: "search",
+        db: null,
+        queue: [],
+        q: "",
+        detail: null,
+        geo: null,
+        user: {
+          role: "guest",
+          name: "",
+          regionId: "gangnam",
+          favs: [],
+          logs: [],
+          wrong: [],
+          notify: { recycle: true, general: true, food: true },
+        },
+        scan: { busy: false, thumb: null, msg: "" },
+        scanMode: "camera",
+        barNo: "",
+        barMsg: "",
+        mapFilter: "all",
+        quiz: null,
+        sub: "fav",
+        formCtx: null,
+      };
+      const item = (id) => S.db.items.find((i) => i.id === id);
+      const region = () =>
+        S.db.regions.find((r) => r.id === S.user.regionId) || S.db.regions[0];
+      function save() {
+        store.set("rc-db", S.db);
+        store.set("rc-user", S.user);
+        store.set("rc-queue", S.queue);
+      }
+
+      /* ===== 검색 (자동완성·초성·유사 품목) ===== */
+      const CHO = [
+        "ㄱ",
+        "ㄲ",
+        "ㄴ",
+        "ㄷ",
+        "ㄸ",
+        "ㄹ",
+        "ㅁ",
+        "ㅂ",
+        "ㅃ",
+        "ㅅ",
+        "ㅆ",
+        "ㅇ",
+        "ㅈ",
+        "ㅉ",
+        "ㅊ",
+        "ㅋ",
+        "ㅌ",
+        "ㅍ",
+        "ㅎ",
+      ];
+      const cho = (s) =>
+        [...s]
+          .map((c) => {
+            const n = c.charCodeAt(0) - 44032;
+            return n >= 0 && n < 11172 ? CHO[Math.floor(n / 588)] : c;
+          })
+          .join("");
+      const norm = (s) =>
+        String(s)
+          .toLowerCase()
+          .replace(/[\s·ㆍ\-_(),./]/g, "");
+      function bigrams(s) {
+        const a = norm(s),
+          r = new Set();
+        if (a.length < 2) {
+          r.add(a);
+          return r;
+        }
+        for (let i = 0; i < a.length - 1; i++) r.add(a.slice(i, i + 2));
+        return r;
+      }
+      function sim(a, b) {
+        const A = bigrams(a),
+          B = bigrams(b);
+        let n = 0;
+        A.forEach((x) => {
+          if (B.has(x)) n++;
+        });
+        const u = A.size + B.size - n;
+        return u ? n / u : 0;
+      }
+      function scoreItem(it, q) {
+        const nq = norm(q);
+        if (!nq) return 0;
+        const isCho = /^[ㄱ-ㅎ]+$/.test(nq);
+        let best = 0;
+        for (const n of [it.name, ...it.aliases]) {
+          const nn = norm(n);
+          let s;
+          if (nn === nq) s = 100;
+          else if (nn.startsWith(nq)) s = 80;
+          else if (nn.includes(nq)) s = 60;
+          else if (nn.length >= 3 && nq.includes(nn)) s = 55;
+          else if (isCho && cho(nn).includes(nq)) s = 52;
+          else s = sim(nq, nn) * 40;
+          if (s > best) best = s;
+        }
+        return best;
+      }
+      function doSearch(q) {
+        const all = S.db.items.map((it) => ({ it, s: scoreItem(it, q) }));
+        const hits = all
+          .filter((x) => x.s >= 50)
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.it);
+        const similar = all
+          .filter((x) => x.s >= 12 && x.s < 50)
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.it);
+        return { hits, similar };
+      }
+      function similarTo(it) {
+        return S.db.items
+          .filter((x) => x.id !== it.id)
+          .map((x) => ({
+            x,
+            s:
+              sim(it.name, x.name) +
+              (x.cat === it.cat ? 0.15 : 0) +
+              (x.material === it.material ? 0.25 : 0),
+          }))
+          .sort((a, b) => b.s - a.s)
+          .slice(0, 4)
+          .map((o) => o.x);
+      }
+
+      /* ===== 배출일 계산 ===== */
+      function nextDay(days) {
+        const t = new Date().getDay();
+        if (!days.length) return null;
+        for (let k = 0; k < 7; k++) if (days.includes((t + k) % 7)) return k;
+        return null;
+      }
+      const dayLabel = (k) =>
+        k === 0 ? "오늘" : k === 1 ? "내일" : `${k}일 뒤`;
+
+      /* ===== 뷰: 공통 ===== */
+      const ICON = {
+        search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/>',
+        scan: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
+        map: '<path d="M12 21s7-6.2 7-11a7 7 0 10-14 0c0 4.8 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+        quiz: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 115 0c0 1.8-2.5 2-2.5 4M12 17v.5"/>',
+        my: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/>',
+      };
+      const TABS = [
+        ["search", "검색"],
+        ["scan", "스캔"],
+        ["map", "수거함"],
+        ["quiz", "퀴즈"],
+        ["my", "MY"],
+      ];
+      function rowHtml(it) {
+        const c = CAT[it.cat];
+        return `<li><button class="row" data-act="openItem" data-id="${esc(it.id)}"><span class="dot" style="background:${c.color}"></span><span class="rn">${esc(it.name)}<small>${esc(it.material)}${it.alt ? " · 오염 시 일반쓰레기" : ""}</small></span><span class="tag" style="color:${c.color};background:${c.tint}">${c.label}</span></button></li>`;
+      }
+      function todayBanner() {
+        const r = region(),
+          d = new Date().getDay(),
+          tm = (d + 1) % 7,
+          member = S.user.role !== "guest";
+        const cats = ["recycle", "general", "food"].filter(
+          (c) => !member || S.user.notify[c],
+        );
+        const today = cats.filter(
+          (c) => r.sched[c] && r.sched[c].days.includes(d),
+        );
+        const tomorrow = member
+          ? cats.filter((c) => r.sched[c] && r.sched[c].days.includes(tm))
+          : [];
+        const line = (a) =>
+          a
+            .map((c) => `<b style="color:${CAT[c].color}">${CAT[c].label}</b>`)
+            .join(" · ");
+        return `<section class="pad"><div class="today"><div class="tl">${esc(r.name)} · 오늘(${DAYS[d]})</div>
+  <div>${today.length ? `${line(today)} 배출일 <small>${esc(r.sched[today[0]].time)}</small>` : "오늘은 정기 배출 품목이 없어요"}</div>
+  ${tomorrow.length ? `<div class="tm">내일(${DAYS[tm]}) ${line(tomorrow)} 배출일이에요. 미리 모아 두세요.</div>` : ""}
+  <div class="fine">샘플 데이터예요. 실제 지침은 지자체 공지를 확인하세요.</div></div></section>`;
+      }
+
+      /* ===== 뷰: 검색 / 상세 ===== */
+      function vSearch() {
+        if (S.detail) return vDetail();
+        return `<section class="hero"><div class="lids"><i style="background:var(--c-recycle)"></i><i style="background:var(--c-general)"></i><i style="background:var(--c-food)"></i><i style="background:var(--c-special)"></i></div>
+  <h1>무엇을 버리시나요?</h1><p class="lead">품목 이름을 입력하면 어디에, 어떻게 버릴지 알려드려요.</p>
+  <div class="searchbox"><input id="q" type="search" placeholder="예: 햇반 용기, 치킨 뼈, ㅊㅋㅃ" autocomplete="off" value="${esc(S.q)}" aria-label="품목 검색"><button class="btn" data-act="doSearch">검색</button></div>
+  <div id="sug"></div></section>
+  ${todayBanner()}
+  <section class="pad"><h3 class="sec">자주 찾는 품목</h3><div class="chips">${["햇반 용기", "치킨 뼈", "종이컵", "배달 용기", "비닐봉지", "건전지"].map((t) => `<button class="chip" data-act="chipQ" data-q="${t}">${t}</button>`).join("")}</div></section>`;
+      }
+      function updateSuggest() {
+        const box = $("#sug");
+        if (!box) return;
+        const q = S.q.trim();
+        if (!q) {
+          box.innerHTML = "";
+          return;
+        }
+        const { hits, similar } = doSearch(q);
+        let h = "";
+        if (hits.length)
+          h += `<ul class="list">${hits.slice(0, 6).map(rowHtml).join("")}</ul>`;
+        else
+          h += `<div class="empty"><b>“${esc(q)}”에 맞는 품목이 없어요.</b><p>철자를 바꿔 보거나 스캔 탭에서 사진으로 찾아보세요.</p></div>`;
+        const rec = (hits.length ? similar : similar).slice(0, 5);
+        if (rec.length)
+          h += `<h3 class="sec">이런 품목은 어때요?</h3><div class="chips">${rec.map((x) => `<button class="chip" data-act="openItem" data-id="${esc(x.id)}">${esc(x.name)}</button>`).join("")}</div>`;
+        if (!hits.length)
+          h += `<button class="btn ghost full" data-act="reqAdd">이 검색어를 관리자에게 알리기</button>`;
+        box.innerHTML = h;
+      }
+      function schedHtml(it) {
+        const r = region();
+        if (it.cat === "special")
+          return `<div class="card"><h3>${esc(r.name)} 배출 안내</h3><p class="sub" style="margin-top:4px">정해진 요일 없이 전용 수거함을 이용해요.</p><button class="btn ghost full" data-act="tab" data-tab="map">가까운 수거함 보기</button></div>`;
+        const s = r.sched[it.cat];
+        if (!s) return "";
+        const today = new Date().getDay(),
+          k = nextDay(s.days);
+        const chips = DAYS.map(
+          (n, i) =>
+            `<span class="day ${s.days.includes(i) ? "on" : ""} ${i === today ? "today" : ""}">${n}</span>`,
+        ).join("");
+        return `<div class="card"><h3>${esc(r.name)} · ${CAT[it.cat].label} 배출</h3>
+  <div class="days" aria-label="배출 요일">${chips}</div>
+  <p>${k === null ? "등록된 배출 요일이 없어요" : `다음 배출 <b>${dayLabel(k)}(${DAYS[(today + k) % 7]})</b>`}${s.time ? ` · ${esc(s.time)}` : ""}</p>
+  ${it.cat === "general" ? `<p class="sub" style="margin-top:6px">${esc(r.bag)}</p>` : ""}
+  ${r.note ? `<p class="fine">${esc(r.note)}</p>` : ""}</div>`;
+      }
+      function vDetail() {
+        const d = S.detail,
+          it = item(d.id);
+        if (!it) {
+          S.detail = null;
+          return vSearch();
+        }
+        const c = CAT[it.cat],
+          fav = S.user.favs.includes(it.id);
+        let note = "";
+        if (d.source === "ai") {
+          const cf = d.meta.confidence || 0;
+          note = `<div class="note"><b>AI 분석</b> 사진에서 “${esc(d.meta.seen || it.name)}”(으)로 보여요 · 확신도 ${Math.round(cf * 100)}%${cf < 0.75 ? "<br>확신이 낮아요. 아래 가이드가 맞는지 확인해 주세요." : ""}${d.meta.reason ? `<br><span class="sub">${esc(d.meta.reason)}</span>` : ""}</div>`;
+        }
+        if (d.source === "barcode")
+          note = `<div class="note"><b>바코드 ${esc(d.meta.code)}</b><br>${esc(d.meta.product)} · 용기 재질 <b>${esc(d.meta.material)}</b></div>`;
+        const sim = similarTo(it);
+        return `<button class="back" data-act="back">‹ 뒤로</button>
+  <div class="lid" style="background:${c.color}"><div class="k">${esc(it.material)}</div><h2>${esc(it.name)}</h2><div class="cat">${c.label}</div>${it.alt ? '<div class="alt">이물질이 지워지지 않으면 → 일반쓰레기</div>' : ""}</div>
+  ${note}
+  <section class="pad"><div class="card"><h3>3단계 분리배출</h3><ol class="steps">${it.steps
+    .slice(0, 3)
+    .map((s) => `<li>${esc(s)}</li>`)
+    .join("")}</ol></div>
+  ${it.warns.length ? `<div class="warn"><b>헷갈리기 쉬워요</b><ul>${it.warns.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+  ${schedHtml(it)}</section>
+  <div class="actions"><button class="btn ghost" data-act="fav" data-id="${esc(it.id)}">${fav ? "★ 즐겨찾기 해제" : "☆ 즐겨찾기"}</button><button class="btn" data-act="logIt" data-id="${esc(it.id)}">오늘 버렸어요</button></div>
+  ${sim.length ? `<section class="pad"><h3 class="sec">비슷한 품목</h3><div class="chips">${sim.map((x) => `<button class="chip" data-act="openItem" data-id="${esc(x.id)}">${esc(x.name)}</button>`).join("")}</div></section>` : ""}`;
+      }
+
+      /* ===== 뷰: 스캔 (AI 카메라 · 바코드) ===== */
+      function vScan() {
+        const m = S.scanMode;
+        return `<section class="pad"><div class="seg"><button class="${m === "camera" ? "on" : ""}" data-act="scanMode" data-m="camera">사진 인식</button><button class="${m === "barcode" ? "on" : ""}" data-act="scanMode" data-m="barcode">바코드</button></div>
+  ${m === "camera" ? camPane() : barPane()}</section>`;
+      }
+      function camPane() {
+        return `<div class="card"><h3>쓰레기를 사진으로 찍어 보세요</h3><p class="sub" style="margin-top:4px">한 가지 품목이 화면 가운데 크게 나오면 더 정확해요.</p>
+  <div class="preview">${S.scan.thumb ? `<img src="${S.scan.thumb}" alt="촬영한 사진">` : "<span>사진이 여기에 표시돼요</span>"}</div>
+  <div>${S.scan.busy ? '<span class="spin"></span> AI가 분석하는 중…' : S.scan.msg || ""}</div>
+  <label class="btn full">카메라로 촬영<input type="file" accept="image/*" capture="environment" hidden id="camIn"></label>
+  <label class="btn ghost full">앨범에서 선택<input type="file" accept="image/*" hidden id="camIn2"></label></div>`;
+      }
+      function barPane() {
+        return `<div class="card"><h3>바코드로 용기 재질 확인</h3><p class="sub" style="margin-top:4px">바코드를 촬영하거나 번호를 입력하세요.</p>
+  <label class="btn full">바코드 촬영<input type="file" accept="image/*" capture="environment" hidden id="barIn"></label>
+  <div class="searchbox mt"><input id="barNo" inputmode="numeric" placeholder="바코드 숫자 8~13자리" value="${esc(S.barNo)}"><button class="btn" data-act="barLookup">조회</button></div>
+  ${S.barMsg ? `<div class="msg">${esc(S.barMsg)}</div>` : ""}
+  <h3 class="sec">데모 바코드</h3><div class="chips">${S.db.barcodes
+    .slice(0, 6)
+    .map(
+      (b) =>
+        `<button class="chip" data-act="barDemo" data-code="${esc(b.code)}">${esc(b.product)}</button>`,
+    )
+    .join("")}</div>
+  <p class="fine">데모용 번호예요. 실제 서비스에는 상품 정보 DB 연동이 필요해요.</p></div>`;
+      }
+      function prep(file) {
+        return new Promise((res, rej) => {
+          const img = new Image(),
+            url = URL.createObjectURL(file);
+          img.onload = () => {
+            const cv = (w) => {
+              const s = Math.min(1, w / Math.max(img.width, img.height));
+              const c = document.createElement("canvas");
+              c.width = Math.round(img.width * s);
+              c.height = Math.round(img.height * s);
+              c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+              return c.toDataURL("image/jpeg", 0.8);
+            };
+            const full = cv(1024),
+              thumb = cv(200);
+            URL.revokeObjectURL(url);
+            res({ b64: full.split(",")[1], thumb });
+          };
+          img.onerror = rej;
+          img.src = url;
+        });
+      }
+      async function aiRecognize(b64) {
+        const list = S.db.items.map((i) => `${i.id}: ${i.name}`).join("\n");
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-6",
+            max_tokens: 1000,
+            system:
+              '당신은 한국 분리배출 품목 분류기입니다. 사진 속 주된 쓰레기 품목을 아래 목록에서 가장 가까운 하나로 고르세요. 목록에 맞는 것이 없으면 matched_id를 null로 하세요. 반드시 JSON 객체 하나만 출력하고 다른 글자나 마크다운은 쓰지 마세요. 형식: {"matched_id": 문자열 또는 null, "seen": "사진에서 본 품목 이름", "confidence": 0에서 1 사이 숫자, "reason": "한국어 한 문장"}\n\n목록:\n' +
+              list,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: "image/jpeg",
+                      data: b64,
+                    },
+                  },
+                  { type: "text", text: "이 쓰레기는 어떤 품목인가요?" },
+                ],
+              },
+            ],
+          }),
+        });
+        if (!res.ok) throw new Error("api " + res.status);
+        const data = await res.json();
+        const text = (data.content || [])
+          .map((c) => (c.type === "text" ? c.text : ""))
+          .join("");
+        return JSON.parse(text.replace(/```json|```/g, "").trim());
+      }
+      function queueAdd(o) {
+        if (
+          o.type === "text" &&
+          S.queue.some(
+            (q) =>
+              q.status === "pending" && q.type === "text" && q.text === o.text,
+          )
+        )
+          return;
+        S.queue.unshift({
+          id: "q" + Date.now() + Math.random().toString(36).slice(2, 5),
+          type: o.type,
+          text: o.text || "",
+          thumb: o.thumb || null,
+          ts: Date.now(),
+          status: "pending",
+        });
+        S.queue = S.queue.slice(0, 60);
+        save();
+      }
+      async function handleImage(file) {
+        if (!file) return;
+        S.scan = { busy: true, thumb: null, msg: "" };
+        render();
+        let p;
+        try {
+          p = await prep(file);
+        } catch (e) {
+          S.scan = {
+            busy: false,
+            thumb: null,
+            msg: "사진을 읽지 못했어요. 다른 사진을 선택해 주세요.",
+          };
+          render();
+          return;
+        }
+        S.scan.thumb = p.thumb;
+        render();
+        try {
+          const r = await aiRecognize(p.b64),
+            it = r.matched_id && item(r.matched_id);
+          if (it && r.confidence >= 0.5) {
+            if (r.confidence < 0.75)
+              queueAdd({ type: "image", text: r.seen || "", thumb: p.thumb });
+            S.scan = { busy: false, thumb: p.thumb, msg: "" };
+            S.detail = { id: it.id, source: "ai", meta: r, from: "scan" };
+            S.tab = "search";
+          } else {
+            queueAdd({ type: "image", text: r.seen || "", thumb: p.thumb });
+            S.scan = {
+              busy: false,
+              thumb: p.thumb,
+              msg: '<div class="msg">품목을 확실히 알아보지 못했어요. 관리자 레이블링 대기열에 저장했어요.<br><button class="btn sm ghost mt" data-act="tab" data-tab="search">이름으로 검색하기</button></div>',
+            };
+          }
+        } catch (e) {
+          S.scan = {
+            busy: false,
+            thumb: p.thumb,
+            msg: '<div class="msg">AI 인식에 실패했어요. 네트워크를 확인하거나 이름으로 검색해 주세요.<br><button class="btn sm ghost mt" data-act="tab" data-tab="search">이름으로 검색하기</button></div>',
+          };
+        }
+        render();
+      }
+      function lookupBarcode(code) {
+        code = String(code || "").replace(/\D/g, "");
+        S.barNo = code;
+        const b = S.db.barcodes.find((x) => x.code === code);
+        if (b && item(b.itemId)) {
+          S.barMsg = "";
+          S.detail = {
+            id: b.itemId,
+            source: "barcode",
+            meta: { code, product: b.product, material: b.material },
+            from: "scan",
+          };
+          S.tab = "search";
+        } else if (code.length < 8) {
+          S.barMsg = "바코드 번호를 8자리 이상 입력해 주세요.";
+        } else {
+          S.barMsg =
+            "등록되지 않은 바코드예요. 관리자 대기열에 남겼어요. 품목 이름으로 검색해 보세요.";
+          queueAdd({ type: "barcode", text: code });
+        }
+        render();
+      }
+      async function barFromPhoto(file) {
+        if (!file) return;
+        if (!("BarcodeDetector" in window)) {
+          S.barMsg =
+            "이 브라우저는 사진으로 바코드를 읽지 못해요. 번호를 직접 입력해 주세요.";
+          render();
+          return;
+        }
+        try {
+          const det = new BarcodeDetector({
+              formats: ["ean_13", "ean_8", "upc_a", "upc_e"],
+            }),
+            bmp = await createImageBitmap(file),
+            r = await det.detect(bmp);
+          if (r.length) lookupBarcode(r[0].rawValue);
+          else {
+            S.barMsg = "바코드를 찾지 못했어요. 더 가까이서 다시 찍어 주세요.";
+            render();
+          }
+        } catch (e) {
+          S.barMsg = "바코드 인식에 실패했어요. 번호를 직접 입력해 주세요.";
+          render();
+        }
+      }
+
+      /* ===== 뷰: 수거함 지도 ===== */
+      function vMap() {
+        const r = region(),
+          origin = S.geo || { lat: r.lat ?? 37.5665, lng: r.lng ?? 126.978 };
+        const pts = S.db.points
+          .filter((p) => S.mapFilter === "all" || p.type === S.mapFilter)
+          .map((p) => ({ ...p, d: km(origin, p) }))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, 12);
+        const maxD = Math.max(1, ...pts.map((p) => p.d));
+        S.mapPts = pts;
+        S.mapOrigin = origin;
+        const kx = Math.cos((origin.lat * Math.PI) / 180) * 111,
+          ky = 111;
+        const dots = pts
+          .map((p, i) => {
+            const x = 150 + (((p.lng - origin.lng) * kx) / maxD) * 115,
+              y = 100 - (((p.lat - origin.lat) * ky) / maxD) * 85;
+            const c = PT_TYPES[p.type].color;
+            return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10" fill="${c}"/><text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">${i + 1}</text>`;
+          })
+          .join("");
+        return `<section class="pad"><h3 class="sec" style="margin-top:6px">${S.geo ? "내 위치 기준" : esc(r.name) + " 중심"} 가까운 수거함</h3>
+  <div class="chips"><button class="chip ${S.mapFilter === "all" ? "on" : ""}" style="${S.mapFilter === "all" ? "background:var(--ink);color:#fff" : ""}" data-act="mapFilter" data-v="all">전체</button>${Object.entries(
+    PT_TYPES,
+  )
+    .map(
+      ([k, v]) =>
+        `<button class="chip" style="${S.mapFilter === k ? "background:var(--ink);color:#fff" : ""}" data-act="mapFilter" data-v="${k}">${v.label}</button>`,
+    )
+    .join("")}</div>
+  ${hasNaver() ? '<div id="nmap" class="plot mt" style="height:300px"></div>' : `<svg class="plot mt" viewBox="0 0 300 200" role="img" aria-label="수거함 상대 위치"><circle cx="150" cy="100" r="115" fill="none" stroke="#B9CCC2" stroke-dasharray="3 4"/><circle cx="150" cy="100" r="58" fill="none" stroke="#B9CCC2" stroke-dasharray="3 4"/><circle cx="150" cy="100" r="6" fill="#12302B"/>${dots}<text x="8" y="192" font-size="10" fill="#587069">바깥 원 약 ${maxD.toFixed(1)}km · 가운데가 ${S.geo ? "내 위치" : "지역 중심"}</text></svg>`}
+  ${S.geo && S.geo.acc ? `<p class="fine">내 위치 정확도 약 ${Math.round(S.geo.acc)}m${S.geo.acc > 1000 ? " · PC는 Wi-Fi/IP로 위치를 추정해서 오차가 커요. 스마트폰에서는 GPS라 훨씬 정확해요." : ""}</p>` : ""}
+  ${S.geo && (!pts.length || pts[0].d > 10) ? `<div class="msg">내 위치 10km 안에 등록된 수거함이 없어요. (샘플 데이터는 일부 지역에만 있어요. 관리자 메뉴에서 공공데이터 CSV를 가져올 수 있어요)<br><button class="btn sm ghost mt" data-act="demoPts">시연용: 내 위치 주변에 샘플 수거함 만들기</button></div>` : ""}
+  <button class="btn ghost full" data-act="locate">내 위치로 정렬하기</button>
+  <ul class="list">${pts.map((p, i) => `<li><div class="row"><span class="dot" style="background:${PT_TYPES[p.type].color}"></span><span class="rn">${i + 1}. ${esc(p.name)}<small>${PT_TYPES[p.type].label} · ${p.d.toFixed(1)}km</small></span><a class="btn sm ghost" target="_blank" rel="noopener" href="https://map.kakao.com/link/map/${encodeURIComponent(p.name)},${p.lat},${p.lng}">지도앱</a></div></li>`).join("") || '<li class="row">표시할 수거함이 없어요</li>'}</ul>
+  <p class="fine">위치는 샘플 데이터예요. 실제 서비스에서는 지자체 공공데이터를 연동해요.</p></section>`;
+      }
+
+      /* ===== 네이버 지도 연동 ===== */
+      const NAVER_CLIENT_ID = "kvj2zpj5yw"; // ← 네이버 클라우드 플랫폼 Application의 Client ID를 여기에 붙여넣기
+      const hasNaver = () => !/^YOUR/.test(NAVER_CLIENT_ID);
+      let naverP = null,
+        naverAuthFail = false;
+      const authMsg = () =>
+        '<div style="padding:16px;font-size:13px"><b>지도 인증에 실패했어요.</b><br>네이버 콘솔의 Web 서비스 URL에 <b>' +
+        esc(location.protocol + "//" + location.hostname) +
+        "</b> 가 등록돼 있는지, Client ID가 맞는지 확인하세요.<br>localhost와 127.0.0.1은 서로 다른 주소로 취급돼요.</div>";
+      function loadNaver() {
+        if (window.naver && naver.maps && naver.maps.Service)
+          return Promise.resolve();
+        if (naverP) return naverP;
+        naverP = new Promise((res, rej) => {
+          window.navermap_authFailure = () => {
+            naverAuthFail = true;
+            const el = $("#nmap");
+            if (el) el.innerHTML = authMsg();
+            rej(new Error("auth"));
+          };
+          window.__naverReady = () => res();
+          const sc = document.createElement("script");
+          sc.src =
+            "https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=" +
+            encodeURIComponent(NAVER_CLIENT_ID) +
+            "&submodules=geocoder&callback=__naverReady";
+          sc.onerror = () => rej(new Error("load"));
+          document.head.appendChild(sc);
+        });
+        naverP.catch(() => {
+          naverP = null;
+        });
+        return naverP;
+      }
+      function reverseAddr(pos) {
+        if (!hasNaver() || naverAuthFail) return Promise.resolve(null);
+        return Promise.race([
+          loadNaver().then(
+            () =>
+              new Promise((res) => {
+                naver.maps.Service.reverseGeocode(
+                  {
+                    coords: new naver.maps.LatLng(pos.lat, pos.lng),
+                    orders: [
+                      naver.maps.Service.OrderType.ADDR,
+                      naver.maps.Service.OrderType.ROAD_ADDR,
+                    ].join(","),
+                  },
+                  (status, r) => {
+                    if (
+                      status !== naver.maps.Service.Status.OK ||
+                      !r ||
+                      !r.v2 ||
+                      !r.v2.address
+                    )
+                      return res(null);
+                    res(
+                      r.v2.address.jibunAddress ||
+                        r.v2.address.roadAddress ||
+                        null,
+                    );
+                  },
+                );
+              }),
+          ),
+          new Promise((res) => setTimeout(() => res(null), 6000)),
+        ]).catch(() => null);
+      }
+      async function initNaverMap() {
+        const el = $("#nmap");
+        if (!el) return;
+        if (naverAuthFail) {
+          el.innerHTML = authMsg();
+          return;
+        }
+        try {
+          await loadNaver();
+        } catch (e) {
+          el.innerHTML =
+            '<div style="padding:16px;font-size:13px">지도를 불러오지 못했어요.<br>① Client ID가 맞는지 ② Web 서비스 URL에 현재 주소(예: http://localhost)가 등록돼 있는지 확인하세요.<br>③ 파일을 더블클릭(file://)하지 말고 http://localhost:포트 로 열어야 해요.</div>';
+          return;
+        }
+        const o = S.mapOrigin,
+          pts = S.mapPts || [],
+          c = new naver.maps.LatLng(o.lat, o.lng);
+        const map = new naver.maps.Map(el, { center: c, zoom: 15 });
+        new naver.maps.Marker({
+          map,
+          position: c,
+          title: S.geo ? "내 위치" : "기준 위치",
+          icon: {
+            content:
+              '<div style="width:16px;height:16px;border-radius:50%;background:' +
+              (S.geo ? "#1F6FD8" : "#12302B") +
+              ";border:3px solid #fff;box-shadow:0 0 0 2px " +
+              (S.geo ? "#1F6FD8" : "#12302B") +
+              '"></div>',
+            anchor: new naver.maps.Point(8, 8),
+          },
+        });
+        const info = new naver.maps.InfoWindow({
+          content: "",
+          borderWidth: 0,
+          disableAnchor: true,
+          backgroundColor: "transparent",
+        });
+        let b = new naver.maps.LatLngBounds(c, c);
+        pts.forEach((p, i) => {
+          const pos = new naver.maps.LatLng(p.lat, p.lng);
+          b.extend(pos);
+          const m = new naver.maps.Marker({
+            map,
+            position: pos,
+            title: p.name,
+            icon: {
+              content: `<div style="width:26px;height:26px;border-radius:50%;background:${PT_TYPES[p.type].color};color:#fff;font:700 12px sans-serif;display:grid;place-items:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">${i + 1}</div>`,
+              anchor: new naver.maps.Point(13, 13),
+            },
+          });
+          naver.maps.Event.addListener(m, "click", () => {
+            info.setContent(
+              `<div style="padding:8px 10px;background:#fff;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.25);font:13px sans-serif;color:#12302B"><b>${esc(p.name)}</b><br>${PT_TYPES[p.type].label}</div>`,
+            );
+            info.open(map, m);
+          });
+        });
+        const pad = { top: 40, right: 40, bottom: 40, left: 40 };
+        if (S.geo) {
+          if (S.geo.acc)
+            new naver.maps.Circle({
+              map,
+              center: c,
+              radius: Math.min(S.geo.acc, 5000),
+              fillColor: "#1F6FD8",
+              fillOpacity: 0.12,
+              strokeColor: "#1F6FD8",
+              strokeOpacity: 0.5,
+              strokeWeight: 1,
+            });
+          const near = pts.filter((p) => p.d <= 3).slice(0, 4);
+          if (near.length) {
+            const bb = new naver.maps.LatLngBounds(c, c);
+            near.forEach((p) => bb.extend(new naver.maps.LatLng(p.lat, p.lng)));
+            map.fitBounds(bb, pad);
+          } else {
+            map.setCenter(c);
+            map.setZoom(16);
+          }
+        } else if (pts.length) map.fitBounds(b, pad);
+      }
+
+      function autoRegion(addr) {
+        const t = addr.split(" ").filter(Boolean);
+        if (!t.length) return null;
+        const parts = [t[0]];
+        for (let i = 1; i < t.length && parts.length < 3; i++) {
+          if (/[시군구]$/.test(t[i])) parts.push(t[i]);
+          else break;
+        }
+        if (parts.length < 2) return null;
+        const name = parts.join(" "),
+          ex = S.db.regions.find((r) => r.name === name);
+        if (ex) return ex;
+        const r = {
+          id: "auto" + Date.now(),
+          name,
+          lat: S.geo.lat,
+          lng: S.geo.lng,
+          sched: mkSched([], [], [], ""),
+          bag: "",
+          note: "이 지역의 배출 지침은 아직 등록되지 않았어요. 관리자 메뉴에서 등록할 수 있어요.",
+        };
+        S.db.regions.push(r);
+        return r;
+      }
+
+      /* ===== 공공데이터(행정안전부 생활쓰레기배출정보) 연동: server.py 의 /api/waste 사용 ===== */
+      const DOWCH = "일월화수목금토";
+      const PROV = {
+        충북: "충청북",
+        충남: "충청남",
+        경북: "경상북",
+        경남: "경상남",
+        전북: "전라북",
+        전남: "전라남",
+      };
+      const provKey = (s) => {
+        s = String(s || "").replace(
+          /특별시|광역시|특별자치시|특별자치도|도$/g,
+          "",
+        );
+        return PROV[s] || s;
+      };
+      const hasSched = (r) =>
+        ["recycle", "general", "food"].some(
+          (c) => r.sched[c] && r.sched[c].days.length,
+        );
+      function parseDow(t) {
+        t = String(t || "").replace(/요일/g, "");
+        if (/매일|전일|상시/.test(t)) return [0, 1, 2, 3, 4, 5, 6];
+        const m = t.match(/([일월화수목금토])\s*~\s*([일월화수목금토])/);
+        if (m) {
+          const a = DOWCH.indexOf(m[1]),
+            b = DOWCH.indexOf(m[2]),
+            o = [];
+          for (let i = a, n = 0; n < 7; i = (i + 1) % 7, n++) {
+            o.push(i);
+            if (i === b) break;
+          }
+          return o;
+        }
+        const o = [];
+        for (const ch of t) {
+          const i = DOWCH.indexOf(ch);
+          if (i >= 0 && !o.includes(i)) o.push(i);
+        }
+        return o;
+      }
+      function wasteCats(item) {
+        const out = {};
+        Object.keys(item).forEach((k) => {
+          const m = k.match(/^(.*)_EMSN_DOW$/);
+          if (!m) return;
+          const pre = m[1];
+          let cat;
+          if (/FOD|FOOD/.test(pre)) cat = "food";
+          else if (/RCYC|RECY|RSRC/.test(pre)) cat = "recycle";
+          else if (/TMPR|TEMP|LGVL|LRG|BULK/.test(pre)) return;
+          else cat = "general";
+          out[cat] = {
+            dow: item[k],
+            bgn: item[pre + "_EMSN_BGNG_TM"],
+            end: item[pre + "_EMSN_END_TM"],
+            mthd: item[pre + "_EMSN_MTHD"],
+            pre,
+          };
+        });
+        return out;
+      }
+      function topVal(arr) {
+        const c = {};
+        arr.filter(Boolean).forEach((v) => (c[v] = (c[v] || 0) + 1));
+        return Object.keys(c).sort((a, b) => c[b] - c[a])[0] || "";
+      }
+      async function loadPublicSched(r, silent) {
+        const toks = r.name.split(" ").filter(Boolean),
+          prov = provKey(toks[0]);
+        const tries = toks.filter((t) => /[시군구]$/.test(t)).reverse();
+        if (!tries.length) {
+          if (!silent) toast("지역 이름에서 시·군·구를 찾지 못했어요");
+          return false;
+        }
+        let items = [];
+        try {
+          for (const t of tries) {
+            const res = await fetch("/api/waste?sgg=" + encodeURIComponent(t));
+            const j = await res.json();
+            if (j.error) {
+              if (!silent) toast(j.error);
+              return false;
+            }
+            const b = j.response && j.response.body;
+            let it = b && b.items && b.items.item;
+            if (!it) continue;
+            if (!Array.isArray(it)) it = [it];
+            const pf = it.filter(
+              (x) => !x.CTPV_NM || provKey(x.CTPV_NM) === prov,
+            );
+            if (pf.length) {
+              items = pf;
+              break;
+            }
+          }
+        } catch (e) {
+          if (!silent)
+            toast(
+              "공공데이터 서버에 연결하지 못했어요. server.py를 켜고 localhost:8000 주소로 열어 주세요.",
+            );
+          return false;
+        }
+        if (!items.length) {
+          if (!silent) toast("이 지역은 공공데이터에 배출 정보가 없어요");
+          return false;
+        }
+        const per = { food: [], recycle: [], general: [] };
+        items.forEach((it) => {
+          const wc = wasteCats(it);
+          Object.keys(wc).forEach((c) => per[c].push(wc[c]));
+        });
+        const keys = Object.keys(items[0]);
+        const kUnc = keys.find((k) => /NCLCT|NOT_CLCT/.test(k)),
+          kDept = keys.find((k) => /DEPT_NM|DEPT_NAME/.test(k)),
+          kTel = keys.find((k) => /TELNO|TEL_NO/.test(k));
+        const missing = [];
+        let genMthd = "";
+        ["recycle", "general", "food"].forEach((c) => {
+          const list = per[c];
+          if (!list.length) {
+            missing.push(CAT[c].label);
+            return;
+          }
+          const best = topVal(
+            list.map((x) => [x.dow, x.bgn, x.end].join("|")),
+          ).split("|");
+          const days = parseDow(best[0]);
+          if (!days.length) {
+            missing.push(CAT[c].label);
+            return;
+          }
+          r.sched[c] = {
+            days,
+            time:
+              best[1] && best[2]
+                ? best[1] + "~" + (best[2] === "00:00" ? "24:00" : best[2])
+                : "",
+          };
+          if (c === "general") genMthd = topVal(list.map((x) => x.mthd));
+        });
+        if (genMthd) r.bag = genMthd.slice(0, 200);
+        const upd = items
+          .map((x) => x.DAT_UPDT_PNT || "")
+          .sort()
+          .reverse()[0];
+        const parts = [
+          "출처: 행정안전부 생활쓰레기배출정보" +
+            (items.length > 1
+              ? ` (${items.length}개 구역 중 가장 많은 설정)`
+              : "") +
+            (upd ? " · 기준 " + upd.slice(0, 10) : ""),
+        ];
+        const unc = kUnc && topVal(items.map((x) => x[kUnc])),
+          dept = kDept && topVal(items.map((x) => x[kDept])),
+          tel = kTel && topVal(items.map((x) => x[kTel]));
+        if (unc) parts.push("미수거일: " + unc);
+        if (dept) parts.push("문의: " + dept + (tel ? " " + tel : ""));
+        r.note = parts.join(" · ");
+        save();
+        render();
+        toast(
+          missing.length
+            ? `${r.name} 배출 정보를 불러왔어요 (${missing.join("·")} 항목은 찾지 못했어요)`
+            : `${r.name} 배출 정보를 공공데이터로 채웠어요`,
+        );
+        return true;
+      }
+
+      /* ===== 뷰: 퀴즈 ===== */
+      function startQuiz() {
+        const tri = shuffle(S.db.items.filter((i) => i.tricky)).slice(0, 3),
+          rest = shuffle(S.db.items.filter((i) => !tri.includes(i))).slice(
+            0,
+            2,
+          );
+        S.quiz = {
+          ids: shuffle([...tri, ...rest]).map((i) => i.id),
+          i: 0,
+          score: 0,
+          picked: null,
+          wrongs: [],
+          done: false,
+        };
+      }
+      function vQuiz() {
+        const z = S.quiz;
+        if (z && !z.done) {
+          const it = item(z.ids[z.i]),
+            ans = z.picked != null;
+          return `<section class="pad"><div class="qhead"><span>${z.i + 1} / ${z.ids.length}</span><span>맞힌 개수 ${z.score}</span></div>
+    <div class="card qcard"><span class="sub">어디에 버릴까요?</span><h2>${esc(it.name)}</h2><p class="sub">${esc(it.aliases.slice(0, 3).join(" · "))}</p></div>
+    <div class="opts">${Object.keys(CAT)
+      .map((k) => {
+        let cls = "";
+        if (ans) {
+          if (k === it.cat) cls = "ok";
+          else if (k === z.picked) cls = "no";
+        }
+        return `<button class="opt ${cls}" ${ans ? "disabled" : ""} data-act="quizPick" data-cat="${k}"><i style="background:${CAT[k].color}"></i>${CAT[k].label}</button>`;
+      })
+      .join("")}</div>
+    ${ans ? `<div class="exp"><b>${z.picked === it.cat ? "정답이에요" : "정답은 " + CAT[it.cat].label + "이에요"}</b><p>${esc(it.warns[0] || it.steps[0])}</p><button class="btn full" data-act="quizNext" style="margin-top:0">${z.i + 1 < z.ids.length ? "다음 문제" : "결과 보기"}</button></div>` : ""}</section>`;
+        }
+        if (z && z.done) {
+          return `<section class="pad"><div class="card"><div class="sub" style="text-align:center">결과</div><div class="score">${z.score} / ${z.ids.length}</div>
+    ${z.wrongs.length ? `<h3 class="sec">틀린 품목</h3><ul class="list" style="margin-top:0">${z.wrongs.map((id) => rowHtml(item(id))).join("")}</ul>` : '<p style="text-align:center">모두 맞혔어요!</p>'}
+    <button class="btn full" data-act="quizStart">다시 풀기</button><button class="btn ghost full" data-act="quizExit">돌아가기</button></div></section>`;
+        }
+        const wrong = S.user.wrong.map(item).filter(Boolean),
+          tri = S.db.items.filter((i) => i.tricky);
+        return `<section class="pad"><div class="card"><h3>분리배출 퀴즈</h3><p class="sub" style="margin-top:4px">헷갈리는 품목 위주로 5문제를 내요.</p><button class="btn full" data-act="quizStart">퀴즈 시작</button></div>
+  ${wrong.length ? `<h3 class="sec">내가 틀렸던 품목</h3><ul class="list" style="margin-top:0">${wrong.slice(0, 8).map(rowHtml).join("")}</ul>` : ""}
+  <h3 class="sec">헷갈리기 쉬운 품목 모음</h3><ul class="list" style="margin-top:0">${tri.map(rowHtml).join("")}</ul></section>`;
+      }
+
+      /* ===== 뷰: MY (회원 · 관리자) ===== */
+      function vMy() {
+        const u = S.user;
+        if (u.role === "guest")
+          return `<section class="pad"><div class="card"><h3>로그인하면 더 편해져요</h3><ul class="perks"><li>자주 버리는 품목 즐겨찾기</li><li>우리 동네 배출일 알림 설정</li><li>분리배출 기록 관리</li></ul><button class="btn full" data-act="login">로그인 / 시작하기</button><p class="fine">품목 검색, AI 인식, 분리배출 가이드, 수거함 지도는 로그인 없이 쓸 수 있어요.</p></div></section>`;
+        const subs = [
+          ["fav", "즐겨찾기"],
+          ["notify", "동네 알림"],
+          ["log", "배출 기록"],
+        ];
+        if (u.role === "admin")
+          subs.push(
+            ["a_items", "품목 DB"],
+            ["a_regions", "지자체 지침"],
+            ["a_points", "수거함 데이터"],
+            ["a_label", "레이블링"],
+          );
+        if (!subs.some((s) => s[0] === S.sub)) S.sub = "fav";
+        const pane = {
+          fav: favPane,
+          notify: notifyPane,
+          log: logPane,
+          a_items: aItems,
+          a_regions: aRegions,
+          a_label: aLabel,
+          a_points: aPoints,
+        }[S.sub]();
+        return `<section class="pad"><div class="today" style="display:flex;justify-content:space-between;align-items:center"><div><b>${esc(u.name || "회원")}</b> <span class="sub">${u.role === "admin" ? "관리자(데모)" : "회원"}</span></div><button class="btn sm ghost" data-act="logout">로그아웃</button></div></section>
+  <div class="subtabs">${subs.map(([k, l]) => `<button class="chip ${S.sub === k ? "on" : ""}" data-act="sub" data-k="${k}">${l}${k === "a_label" && S.queue.some((q) => q.status === "pending") ? " ●" : ""}</button>`).join("")}</div>
+  <section class="pad">${pane}</section>`;
+      }
+      function favPane() {
+        const f = S.user.favs.map(item).filter(Boolean);
+        return f.length
+          ? `<ul class="list" style="margin-top:0">${f.map(rowHtml).join("")}</ul>`
+          : `<div class="empty"><b>아직 즐겨찾기가 없어요</b><p>품목 화면에서 ☆를 눌러 저장해 보세요.</p></div>`;
+      }
+      function notifyPane() {
+        const r = region(),
+          n = S.user.notify;
+        return `<div class="card" style="margin-top:0"><h3>${esc(r.name)} 배출일 알림</h3><p class="sub" style="margin-top:4px">켠 분류는 앱을 열 때 홈 화면 상단에 오늘·내일 배출일로 알려드려요.</p>
+  ${["recycle", "general", "food"].map((c) => `<div class="stat" style="align-items:center;padding:12px 0;border-top:1px solid var(--line);margin-top:10px"><div><b style="color:${CAT[c].color}">${CAT[c].label}</b><div class="sub">${r.sched[c] ? r.sched[c].days.map((d) => DAYS[d]).join("·") : "-"} ${esc(r.sched[c]?.time || "")}</div></div><button class="sw ${n[c] ? "on" : ""}" role="switch" aria-checked="${!!n[c]}" aria-label="${CAT[c].label} 알림" data-act="notifyTog" data-c="${c}"></button></div>`).join("")}
+  <p class="fine">푸시 알림은 서버 연동 후 지원해요.</p></div>`;
+      }
+      function logPane() {
+        const now = new Date(),
+          logs = S.user.logs,
+          mo = logs.filter((l) => {
+            const d = new Date(l.ts);
+            return (
+              d.getMonth() === now.getMonth() &&
+              d.getFullYear() === now.getFullYear()
+            );
+          });
+        const cnt = {};
+        Object.keys(CAT).forEach(
+          (k) => (cnt[k] = mo.filter((l) => l.cat === k).length),
+        );
+        const mx = Math.max(1, ...Object.values(cnt));
+        return `<div class="card" style="margin-top:0"><h3>이번 달 ${mo.length}회 분리배출</h3>${Object.keys(
+          CAT,
+        )
+          .map(
+            (k) =>
+              `<div class="stat"><span>${CAT[k].label}</span><b>${cnt[k]}</b></div><div class="bar" style="width:${Math.max(3, (cnt[k] / mx) * 100)}%;background:${CAT[k].color}"></div>`,
+          )
+          .join("")}</div>
+  ${
+    logs.length
+      ? `<ul class="list">${logs
+          .slice(0, 15)
+          .map((l, i) => {
+            const it = item(l.id);
+            return `<li><div class="row"><span class="dot" style="background:${CAT[l.cat].color}"></span><span class="rn">${esc(it ? it.name : "삭제된 품목")}<small>${fmtDate(l.ts)}</small></span><button class="btn sm ghost" data-act="logDel" data-i="${i}">삭제</button></div></li>`;
+          })
+          .join("")}</ul>`
+      : `<div class="empty"><b>기록이 없어요</b><p>품목 화면에서 “오늘 버렸어요”를 눌러 보세요.</p></div>`
+  }`;
+      }
+      function aItems() {
+        return `<button class="btn full" style="margin-top:0" data-act="itemNew">새 품목 추가</button>
+  <ul class="list">${S.db.items.map((it) => `<li><button class="row" data-act="itemEdit" data-id="${esc(it.id)}"><span class="dot" style="background:${CAT[it.cat].color}"></span><span class="rn">${esc(it.name)}<small>${CAT[it.cat].label} · ${esc(it.material)}</small></span><span class="sub">수정</span></button></li>`).join("")}</ul>
+  <p class="fine">총 ${S.db.items.length}개 품목 · 저장하면 검색, 퀴즈, AI 인식 후보에 바로 반영돼요.</p>`;
+      }
+      function aRegions() {
+        return `<button class="btn full" style="margin-top:0" data-act="regPublicCur">현재 지역(${esc(region().name)}) 공공데이터로 채우기</button>
+  <button class="btn ghost full" data-act="regNew">지자체 추가</button>
+  <ul class="list">${S.db.regions.map((r) => `<li><button class="row" data-act="regEdit" data-id="${esc(r.id)}"><span class="rn">${esc(r.name)}<small>재활용 ${r.sched.recycle.days.map((d) => DAYS[d]).join("·") || "-"} · 일반 ${r.sched.general.days.map((d) => DAYS[d]).join("·") || "-"}</small></span><span class="sub">수정</span></button></li>`).join("")}</ul>`;
+      }
+      function aPoints() {
+        const csv = S.db.points.filter((p) =>
+          String(p.id).startsWith("csv"),
+        ).length;
+        return `<div class="card" style="margin-top:0"><h3>수거함 CSV 가져오기</h3><p class="sub" style="margin-top:4px">공공데이터포털에서 받은 CSV 또는 JSON 파일(위도·경도 포함)을 올리면 수거함 지도에 표시돼요.</p>
+  <label class="f">수거함 종류<select id="csvType">${Object.entries(PT_TYPES)
+    .map(([k, v]) => `<option value="${k}">${v.label}</option>`)
+    .join("")}</select></label>
+  <label class="f">이 단어가 들어간 행만 가져오기 (선택)<input id="csvFilter" placeholder="예: 군산"></label>
+  <label class="btn full">CSV·JSON 파일 선택<input type="file" accept=".csv,.json,text/csv,application/json" hidden id="csvIn"></label>
+  <p class="fine">가져온 수거함 ${csv}곳 · 샘플 ${S.db.points.length - csv}곳. 좌표(위도·경도)가 없는 행은 건너뛰어요.</p>
+  ${csv ? '<button class="btn ghost danger full" data-act="ptClear">가져온 수거함 모두 삭제</button>' : ""}</div>`;
+      }
+      function parseCsv(t) {
+        const rows = [];
+        let row = [],
+          f = "",
+          q = false;
+        for (let i = 0; i < t.length; i++) {
+          const c = t[i];
+          if (q) {
+            if (c === '"') {
+              if (t[i + 1] === '"') {
+                f += '"';
+                i++;
+              } else q = false;
+            } else f += c;
+          } else if (c === '"') q = true;
+          else if (c === ",") {
+            row.push(f);
+            f = "";
+          } else if (c === "\n" || c === "\r") {
+            if (c === "\r" && t[i + 1] === "\n") i++;
+            row.push(f);
+            f = "";
+            if (row.some((x) => x !== "")) rows.push(row);
+            row = [];
+          } else f += c;
+        }
+        if (f !== "" || row.length) {
+          row.push(f);
+          if (row.some((x) => x !== "")) rows.push(row);
+        }
+        return rows;
+      }
+      async function importCsv(file) {
+        if (!file) return;
+        const type = $("#csvType").value,
+          flt = ($("#csvFilter").value || "").trim(),
+          buf = await file.arrayBuffer();
+        let text;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+        } catch (e) {
+          try {
+            text = new TextDecoder("euc-kr").decode(buf);
+          } catch (e2) {
+            toast("파일을 읽지 못했어요");
+            return;
+          }
+        }
+        const tt = text.replace(/^\uFEFF/, "").trim();
+        let rows;
+        if (tt[0] === "{" || tt[0] === "[") {
+          let arr = null;
+          try {
+            const findArr = (o) => {
+              if (Array.isArray(o))
+                return o[0] && typeof o[0] === "object" && !Array.isArray(o[0])
+                  ? o
+                  : null;
+              if (o && typeof o === "object") {
+                for (const [, v] of Object.entries(o).sort(
+                  ([a], [b]) => (a === "fields") - (b === "fields"),
+                )) {
+                  const a = findArr(v);
+                  if (a) return a;
+                }
+              }
+              return null;
+            };
+            arr = findArr(JSON.parse(tt));
+          } catch (e) {}
+          if (!arr || !arr.length) {
+            toast("JSON에서 수거함 목록을 찾지 못했어요");
+            return;
+          }
+          const head = Object.keys(arr[0]);
+          rows = [head].concat(
+            arr.map((x) => head.map((k) => (x[k] == null ? "" : String(x[k])))),
+          );
+        } else rows = parseCsv(tt);
+        if (rows.length < 2) {
+          toast("데이터가 비어 있어요");
+          return;
+        }
+        const head = rows[0].map((h) => h.trim()),
+          idx = (re) => head.findIndex((h) => re.test(h));
+        const iLat = idx(/위도|latitude|^lat/i),
+          iLng = idx(/경도|longitude|^lng|^lon|^lot$/i);
+        if (iLat < 0 || iLng < 0) {
+          toast(
+            "위도·경도 항목을 찾지 못했어요. 주소만 있는 파일은 지원하지 않아요.",
+          );
+          return;
+        }
+        const iName = idx(
+            /설치장소명|장소명|시설명|상세위치|설치위치|설치장소|수거함명|DTL_PSTN|INSTL_PLC_NM/i,
+          ),
+          iAddr = idx(/도로명|소재지|주소|ADDR|RDNMADR/i);
+        const out = [];
+        let skip = 0;
+        for (let r = 1; r < rows.length; r++) {
+          const row = rows[r],
+            lat = parseFloat(row[iLat]),
+            lng = parseFloat(row[iLng]);
+          if (flt && !row.join(" ").includes(flt)) continue;
+          if (!(lat >= 33 && lat <= 39 && lng >= 124 && lng <= 132)) {
+            skip++;
+            continue;
+          }
+          const nm =
+            (iName >= 0 && row[iName]) ||
+            (iAddr >= 0 && row[iAddr]) ||
+            PT_TYPES[type].label;
+          out.push({
+            id: "csv" + Date.now() + "_" + r,
+            region: S.user.regionId,
+            type,
+            name: String(nm).trim().slice(0, 40),
+            lat,
+            lng,
+          });
+          if (out.length >= 8000) break;
+        }
+        if (!out.length) {
+          toast(
+            flt
+              ? `“${flt}”가 들어간 행이 없어요. 파일에 해당 지역이 없을 수 있어요.`
+              : "가져올 수 있는 행이 없어요",
+          );
+          return;
+        }
+        S.db.points = S.db.points.concat(out);
+        save();
+        render();
+        toast(
+          `${out.length}곳을 가져왔어요` +
+            (skip ? ` (좌표 없는 ${skip}곳은 제외)` : ""),
+        );
+      }
+      function aLabel() {
+        const pend = S.queue.filter((q) => q.status === "pending"),
+          done = S.queue.filter((q) => q.status === "done").length;
+        if (!pend.length)
+          return `<div class="empty"><b>레이블링할 데이터가 없어요</b><p>AI가 못 알아본 사진, 검색 결과가 없던 검색어, 등록 안 된 바코드가 여기에 쌓여요. 완료 ${done}건</p></div>`;
+        return (
+          pend
+            .map(
+              (
+                q,
+              ) => `<div class="card q" style="margin-top:0;margin-bottom:12px">${q.thumb ? `<img src="${q.thumb}" alt="미인식 사진">` : ""}
+  <div><b>${{ image: "사진", text: "검색어", barcode: "바코드" }[q.type]}</b> <span class="sub">${fmtDate(q.ts)}</span><p>${esc(q.text || "(설명 없음)")}</p></div>
+  <select id="ql_${q.id}" aria-label="품목 선택">${S.db.items.map((i) => `<option value="${esc(i.id)}">${esc(i.name)}</option>`).join("")}</select>
+  <div class="row2"><button class="btn sm" data-act="qLabel" data-id="${q.id}">이 품목으로 확정</button><button class="btn sm ghost" data-act="qNew" data-id="${q.id}">새 품목 등록</button><button class="btn sm ghost danger" data-act="qDel" data-id="${q.id}">삭제</button></div></div>`,
+            )
+            .join("") +
+          `<p class="fine">확정하면 검색어는 해당 품목의 다른 이름으로, 바코드는 재질 DB로 학습돼요. (데모: 이 기기에만 저장)</p>`
+        );
+      }
+
+      /* ===== 시트 (모달) ===== */
+      function openSheet(html) {
+        $("#sheet").innerHTML = html;
+        $("#sheetWrap").classList.remove("hidden");
+      }
+      function closeSheet() {
+        $("#sheetWrap").classList.add("hidden");
+      }
+      function itemForm(it, pre) {
+        const v = it || {
+          id: "",
+          name: pre || "",
+          aliases: [],
+          cat: "recycle",
+          alt: false,
+          material: "",
+          steps: ["", "", ""],
+          warns: [],
+          tricky: false,
+        };
+        openSheet(`<h3>${it ? "품목 수정" : "새 품목"}</h3>
+  <label class="f">이름<input id="f_name" value="${esc(v.name)}"></label>
+  <label class="f">다른 이름 (쉼표로 구분)<input id="f_alias" value="${esc(v.aliases.join(", "))}"></label>
+  <label class="f">분류<select id="f_cat">${Object.keys(CAT)
+    .map(
+      (k) =>
+        `<option value="${k}" ${v.cat === k ? "selected" : ""}>${CAT[k].label}</option>`,
+    )
+    .join("")}</select></label>
+  <label class="f">재질<input id="f_mat" value="${esc(v.material)}"></label>
+  <label class="f">3단계 가이드 (한 줄에 한 단계)<textarea id="f_steps" rows="4">${esc(v.steps.join("\n"))}</textarea></label>
+  <label class="f">주의사항 (한 줄에 하나)<textarea id="f_warn" rows="3">${esc(v.warns.join("\n"))}</textarea></label>
+  <label class="chk"><input type="checkbox" id="f_alt" ${v.alt ? "checked" : ""}> 오염되면 일반쓰레기로 배출</label>
+  <label class="chk"><input type="checkbox" id="f_tri" ${v.tricky ? "checked" : ""}> 헷갈리기 쉬운 품목 (퀴즈에 자주 출제)</label>
+  <div class="row2"><button class="btn" data-act="itemSave" data-id="${esc(v.id)}">저장</button>${it ? `<button class="btn ghost danger" data-act="itemDel" data-id="${esc(v.id)}">삭제</button>` : ""}</div>`);
+      }
+      function regForm(r) {
+        const v = r || {
+          id: "",
+          name: "",
+          lat: "",
+          lng: "",
+          sched: mkSched([], [], [], ""),
+          bag: "",
+          note: "",
+        };
+        openSheet(`<h3>${r ? "지침 수정" : "지자체 추가"}</h3>
+  <label class="f">지자체 이름<input id="r_name" value="${esc(v.name)}" placeholder="예: 서울 송파구"></label>
+  <div class="row2"><label class="f">위도(선택)<input id="r_lat" inputmode="decimal" value="${v.lat ?? ""}"></label><label class="f">경도(선택)<input id="r_lng" inputmode="decimal" value="${v.lng ?? ""}"></label></div>
+  ${["recycle", "general", "food"].map((c) => `<div class="f"><span>${CAT[c].label} 배출 요일·시간</span><div class="days" data-cat="${c}">${DAYS.map((n, i) => `<button type="button" class="day ${v.sched[c].days.includes(i) ? "on" : ""}" data-act="dayTog" data-d="${i}">${n}</button>`).join("")}</div><input id="r_t_${c}" placeholder="예: 18:00~24:00" value="${esc(v.sched[c].time)}"></div>`).join("")}
+  <label class="f">종량제 봉투 규칙<textarea id="r_bag" rows="2">${esc(v.bag)}</textarea></label>
+  <label class="f">참고 메모<textarea id="r_note" rows="2">${esc(v.note)}</textarea></label>
+  <button class="btn full" data-act="regSave" data-id="${esc(v.id)}">저장</button>`);
+      }
+
+      /* ===== 렌더 ===== */
+      function render() {
+        $("#regionName").textContent = region().name;
+        $("#tabs").innerHTML = TABS.map(
+          ([k, l]) =>
+            `<button class="${S.tab === k ? "on" : ""}" data-act="tab" data-tab="${k}" aria-label="${l}"><svg viewBox="0 0 24 24">${ICON[k]}</svg>${l}</button>`,
+        ).join("");
+        $("#view").innerHTML = {
+          search: vSearch,
+          scan: vScan,
+          map: vMap,
+          quiz: vQuiz,
+          my: vMy,
+        }[S.tab]();
+        if (S.tab === "search") updateSuggest();
+        if (S.tab === "map") initNaverMap();
+      }
+
+      /* ===== 액션 ===== */
+      const needLogin = () => {
+        if (S.user.role === "guest") {
+          A.login();
+          toast("로그인하면 사용할 수 있어요");
+          return true;
+        }
+        return false;
+      };
+      const A = {
+        tab(d) {
+          const same = S.tab === d.tab;
+          S.tab = d.tab;
+          if (
+            d.tab === "search" &&
+            (same || (S.detail && S.detail.from === "scan"))
+          )
+            S.detail = null;
+          render();
+          window.scrollTo(0, 0);
+          if (d.tab === "map" && !S.geo && !S.autoLoc) {
+            S.autoLoc = true;
+            A.gps();
+          }
+        },
+        openItem(d) {
+          S.detail = {
+            id: d.id,
+            source: "text",
+            from: S.detail ? S.detail.from : S.tab,
+          };
+          S.tab = "search";
+          render();
+          window.scrollTo(0, 0);
+        },
+        back() {
+          const f = S.detail && S.detail.from;
+          S.detail = null;
+          S.tab = f && f !== "search" ? f : "search";
+          render();
+          window.scrollTo(0, 0);
+        },
+        chipQ(d) {
+          S.q = d.q;
+          render();
+          $("#q")?.focus();
+        },
+        doSearch() {
+          const { hits } = doSearch(S.q);
+          if (hits[0]) A.openItem({ id: hits[0].id });
+          else updateSuggest();
+        },
+        reqAdd() {
+          queueAdd({ type: "text", text: S.q.trim() });
+          toast("관리자에게 전달했어요");
+        },
+        fav(d) {
+          if (needLogin()) return;
+          const f = S.user.favs,
+            i = f.indexOf(d.id);
+          if (i >= 0) f.splice(i, 1);
+          else f.unshift(d.id);
+          save();
+          render();
+          toast(i >= 0 ? "즐겨찾기에서 뺐어요" : "즐겨찾기에 저장했어요");
+        },
+        logIt(d) {
+          if (needLogin()) return;
+          const it = item(d.id);
+          S.user.logs.unshift({ id: it.id, cat: it.cat, ts: Date.now() });
+          save();
+          toast("분리배출을 기록했어요");
+        },
+        sheetBg(d, t, e) {
+          if (e.target === t) closeSheet();
+        },
+        region() {
+          openSheet(
+            `<h3>내 지역 선택</h3><button class="btn full" data-act="gps">현재 위치로 찾기</button><ul class="list">${S.db.regions.map((r) => `<li><button class="row" data-act="setRegion" data-id="${esc(r.id)}"><span class="dot" style="background:${r.id === S.user.regionId ? "var(--brand)" : "var(--line)"}"></span><span class="rn">${esc(r.name)}</span></button></li>`).join("")}</ul><p class="fine">등록된 지자체만 선택할 수 있어요.</p>`,
+          );
+        },
+        setRegion(d) {
+          S.user.regionId = d.id;
+          S.geo = null;
+          save();
+          closeSheet();
+          render();
+          toast(region().name + "로 설정했어요");
+        },
+        gps() {
+          if (!navigator.geolocation) {
+            toast("이 기기에서는 위치를 쓸 수 없어요");
+            return;
+          }
+          toast("위치를 찾는 중…");
+          navigator.geolocation.getCurrentPosition(
+            async (p) => {
+              S.geo = {
+                lat: p.coords.latitude,
+                lng: p.coords.longitude,
+                acc: p.coords.accuracy,
+              };
+              closeSheet();
+              render();
+              const acc = " · 정확도 약 " + Math.round(S.geo.acc) + "m";
+              const addr = await reverseAddr(S.geo);
+              let c = null;
+              if (addr) {
+                const m = S.db.regions.find((r) =>
+                  addr.includes(r.name.split(" ").pop()),
+                );
+                if (m) c = { r: m, d: 0 };
+                else {
+                  const nr = autoRegion(addr);
+                  if (nr) c = { r: nr, d: 0, auto: true };
+                }
+              }
+              if (!c) {
+                const n = S.db.regions
+                  .filter((r) => r.lat != null && r.lng != null)
+                  .map((r) => ({ r, d: km(S.geo, r) }))
+                  .sort((a, b) => a.d - b.d)[0];
+                if (n && n.d <= 30) c = n;
+              }
+              const changed = c && c.r.id !== S.user.regionId;
+              if (c) {
+                S.user.regionId = c.r.id;
+                save();
+              }
+              if (changed) render();
+              if (c && !hasSched(c.r)) loadPublicSched(c.r, true);
+              if (addr)
+                toast(
+                  "현재 위치: " +
+                    addr.split(" ").slice(0, 3).join(" ") +
+                    (c
+                      ? " → " +
+                        c.r.name +
+                        (c.auto ? " 지역을 새로 만들었어요" : "로 설정")
+                      : " (등록된 지자체 아님)") +
+                    acc,
+                );
+              else
+                toast(
+                  (c ? c.r.name + "로 설정했어요" : "위치를 찾았어요") + acc,
+                );
+            },
+            (err) =>
+              toast(
+                err.code === 1
+                  ? "위치 권한이 막혀 있어요. 주소창 왼쪽 자물쇠에서 위치를 허용해 주세요."
+                  : err.code === 3
+                    ? "위치를 찾는 데 너무 오래 걸려요. 다시 눌러 주세요."
+                    : "위치를 가져올 수 없어요. 기기의 위치 서비스를 켜 주세요.",
+              ),
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+          );
+        },
+        demoPts() {
+          if (!S.geo) return;
+          S.db.points = S.db.points.filter(
+            (p) => !String(p.id).startsWith("demo"),
+          );
+          const offs = [
+            [0.003, 0.002],
+            [-0.002, 0.004],
+            [0.004, -0.003],
+            [-0.004, -0.002],
+            [0.001, 0.005],
+            [-0.003, -0.004],
+          ];
+          Object.keys(PT_TYPES).forEach((t, i) => {
+            for (let j = 0; j < 2; j++) {
+              const o = offs[i * 2 + j];
+              S.db.points.push({
+                id: "demo" + i + j,
+                region: S.user.regionId,
+                type: t,
+                name: `내 주변 ${PT_TYPES[t].label} ${j + 1} (시연 샘플)`,
+                lat: S.geo.lat + o[0],
+                lng: S.geo.lng + o[1],
+              });
+            }
+          });
+          save();
+          render();
+          toast("시연용 샘플 수거함 6곳을 만들었어요");
+        },
+        locate() {
+          A.gps();
+        },
+        scanMode(d) {
+          S.scanMode = d.m;
+          render();
+        },
+        barLookup() {
+          lookupBarcode($("#barNo").value);
+        },
+        barDemo(d) {
+          lookupBarcode(d.code);
+        },
+        mapFilter(d) {
+          S.mapFilter = d.v;
+          render();
+        },
+        quizStart() {
+          startQuiz();
+          render();
+        },
+        quizExit() {
+          S.quiz = null;
+          render();
+        },
+        quizPick(d) {
+          const z = S.quiz;
+          if (z.picked != null) return;
+          const it = item(z.ids[z.i]);
+          z.picked = d.cat;
+          if (d.cat === it.cat) z.score++;
+          else {
+            z.wrongs.push(it.id);
+            if (!S.user.wrong.includes(it.id)) S.user.wrong.unshift(it.id);
+            save();
+          }
+          render();
+        },
+        quizNext() {
+          const z = S.quiz;
+          z.picked = null;
+          if (z.i + 1 < z.ids.length) z.i++;
+          else z.done = true;
+          render();
+        },
+        login() {
+          openSheet(
+            `<h3>로그인</h3><p class="sub">데모용 로그인이에요. 실제 서비스에서는 서버 인증(소셜 로그인 등)이 필요해요.</p><label class="f">닉네임<input id="nick" placeholder="예: 서현" maxlength="12"></label><button class="btn full" data-act="loginDo" data-role="member">회원으로 시작</button><button class="btn ghost full" data-act="loginDo" data-role="admin">관리자로 시작 (데모)</button>`,
+          );
+        },
+        loginDo(d) {
+          S.user.role = d.role;
+          S.user.name =
+            ($("#nick").value || "").trim() ||
+            (d.role === "admin" ? "관리자" : "회원");
+          S.sub = "fav";
+          save();
+          closeSheet();
+          render();
+          toast("환영해요, " + S.user.name);
+        },
+        logout() {
+          S.user.role = "guest";
+          S.user.name = "";
+          save();
+          render();
+        },
+        sub(d) {
+          S.sub = d.k;
+          render();
+        },
+        notifyTog(d) {
+          S.user.notify[d.c] = !S.user.notify[d.c];
+          save();
+          render();
+        },
+        logDel(d) {
+          S.user.logs.splice(+d.i, 1);
+          save();
+          render();
+        },
+        itemNew() {
+          S.formCtx = null;
+          itemForm(null);
+        },
+        itemEdit(d) {
+          S.formCtx = null;
+          itemForm(item(d.id));
+        },
+        itemSave(d) {
+          const name = $("#f_name").value.trim(),
+            steps = $("#f_steps")
+              .value.split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          if (!name) {
+            toast("이름을 입력해 주세요");
+            return;
+          }
+          if (!steps.length) {
+            toast("가이드를 한 단계 이상 입력해 주세요");
+            return;
+          }
+          const o = {
+            name,
+            aliases: $("#f_alias")
+              .value.split(",")
+              .map((s) => s.trim())
+              .filter(Boolean),
+            cat: $("#f_cat").value,
+            material: $("#f_mat").value.trim() || "-",
+            steps,
+            warns: $("#f_warn")
+              .value.split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+            alt: $("#f_alt").checked,
+            tricky: $("#f_tri").checked,
+          };
+          let saved;
+          if (d.id) {
+            saved = item(d.id);
+            Object.assign(saved, o);
+          } else {
+            saved = { id: "i" + Date.now(), ...o };
+            S.db.items.push(saved);
+          }
+          if (S.formCtx) {
+            const q = S.queue.find((x) => x.id === S.formCtx);
+            if (q) {
+              q.status = "done";
+              q.label = saved.id;
+            }
+            S.formCtx = null;
+          }
+          save();
+          closeSheet();
+          render();
+          toast("품목을 저장했어요");
+        },
+        itemDel(d) {
+          S.db.items = S.db.items.filter((i) => i.id !== d.id);
+          S.user.favs = S.user.favs.filter((i) => i !== d.id);
+          S.db.barcodes = S.db.barcodes.filter((b) => b.itemId !== d.id);
+          save();
+          closeSheet();
+          render();
+          toast("품목을 삭제했어요");
+        },
+        regNew() {
+          regForm(null);
+        },
+        regEdit(d) {
+          regForm(S.db.regions.find((r) => r.id === d.id));
+        },
+        dayTog(d, t) {
+          t.classList.toggle("on");
+        },
+        regSave(d) {
+          const name = $("#r_name").value.trim();
+          if (!name) {
+            toast("지자체 이름을 입력해 주세요");
+            return;
+          }
+          const sched = {};
+          ["recycle", "general", "food"].forEach((c) => {
+            sched[c] = {
+              days: [
+                ...document.querySelectorAll(`.days[data-cat="${c}"] .day.on`),
+              ].map((b) => +b.dataset.d),
+              time: $("#r_t_" + c).value.trim(),
+            };
+          });
+          const lat = parseFloat($("#r_lat").value),
+            lng = parseFloat($("#r_lng").value);
+          const o = {
+            name,
+            sched,
+            bag: $("#r_bag").value.trim(),
+            note: $("#r_note").value.trim(),
+            lat: isNaN(lat) ? null : lat,
+            lng: isNaN(lng) ? null : lng,
+          };
+          if (d.id)
+            Object.assign(
+              S.db.regions.find((r) => r.id === d.id),
+              o,
+            );
+          else S.db.regions.push({ id: "r" + Date.now(), ...o });
+          save();
+          closeSheet();
+          render();
+          toast("지침을 저장했어요");
+        },
+        qLabel(d) {
+          const q = S.queue.find((x) => x.id === d.id),
+            it = item($("#ql_" + d.id).value);
+          if (!q || !it) return;
+          if (
+            q.type === "text" &&
+            q.text &&
+            !it.aliases.includes(q.text) &&
+            norm(q.text) !== norm(it.name)
+          )
+            it.aliases.push(q.text);
+          if (
+            q.type === "barcode" &&
+            q.text &&
+            !S.db.barcodes.some((b) => b.code === q.text)
+          )
+            S.db.barcodes.push({
+              code: q.text,
+              product: "레이블링 등록 상품",
+              material: it.material,
+              itemId: it.id,
+            });
+          q.status = "done";
+          q.label = it.id;
+          save();
+          render();
+          toast(`“${it.name}”(으)로 확정했어요`);
+        },
+        qNew(d) {
+          const q = S.queue.find((x) => x.id === d.id);
+          S.formCtx = d.id;
+          itemForm(null, q && q.type === "text" ? q.text : "");
+        },
+        regPublicCur() {
+          toast("공공데이터를 불러오는 중…");
+          loadPublicSched(region(), false);
+        },
+        ptClear() {
+          S.db.points = S.db.points.filter(
+            (p) => !String(p.id).startsWith("csv"),
+          );
+          save();
+          render();
+          toast("가져온 수거함을 삭제했어요");
+        },
+        qDel(d) {
+          S.queue = S.queue.filter((x) => x.id !== d.id);
+          save();
+          render();
+        },
+      };
+      document.addEventListener("click", (e) => {
+        const t = e.target.closest("[data-act]");
+        if (!t) return;
+        const f = A[t.dataset.act];
+        if (f) f(t.dataset, t, e);
+      });
+      document.addEventListener("input", (e) => {
+        if (e.target.id === "q") {
+          S.q = e.target.value;
+          updateSuggest();
+        } else if (e.target.id === "barNo") {
+          S.barNo = e.target.value;
+        }
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          if (e.target.id === "q") {
+            e.preventDefault();
+            A.doSearch();
+          } else if (e.target.id === "barNo") {
+            e.preventDefault();
+            A.barLookup();
+          }
+        }
+      });
+      document.addEventListener("change", (e) => {
+        const id = e.target.id,
+          f = e.target.files && e.target.files[0];
+        if (id === "camIn" || id === "camIn2") handleImage(f);
+        else if (id === "barIn") barFromPhoto(f);
+        else if (id === "csvIn") importCsv(f);
+        if (e.target.type === "file") e.target.value = "";
+      });
+
+      /* ===== 시작 ===== */
+      (async function init() {
+        const [db, user, q] = await Promise.all([
+          store.get("rc-db"),
+          store.get("rc-user"),
+          store.get("rc-queue"),
+        ]);
+        S.db = db && db.items && db.regions ? db : seedDB();
+        if (!S.db.points) S.db.points = seedDB().points;
+        if (!S.db.barcodes) S.db.barcodes = BARCODE_SEED.map((b) => ({ ...b }));
+        if (user) Object.assign(S.user, user);
+        if (q) S.queue = q;
+        if (!S.db.regions.some((r) => r.id === S.user.regionId))
+          S.user.regionId = S.db.regions[0].id;
+        render();
+      })();
+    </script>
+  </body>
+</html>
