@@ -60,6 +60,7 @@
     <div class="sheetWrap hidden" id="sheetWrap" data-act="sheetBg">
       <div class="sheet" id="sheet"></div>
     </div>
+    <div class="authScreen hidden" id="authScreen" role="dialog" aria-modal="true" aria-labelledby="authTitle"></div>
     <div id="toast" role="status"></div>
 
     <script>
@@ -2206,8 +2207,10 @@
           render();
         },
         login() {
+          /* Supabase가 연결돼 있으면 실제 로그인 화면, 아니면 예전 데모 로그인 */
+          if (sb) return showAuth();
           openSheet(
-            `<h3>로그인</h3><p class="sub">데모용 로그인이에요. 실제 서비스에서는 서버 인증(소셜 로그인 등)이 필요해요.</p><label class="f">닉네임<input id="nick" placeholder="예: 서현" maxlength="12"></label><button class="btn full" data-act="loginDo" data-role="member">회원으로 시작</button><button class="btn ghost full" data-act="loginDo" data-role="admin">관리자로 시작 (데모)</button>`,
+            `<h3>로그인</h3><p class="sub">데모용 로그인이에요. 서버에 연결되지 않아 닉네임만 입력해요.</p><label class="f">닉네임<input id="nick" placeholder="예: 서현" maxlength="12"></label><button class="btn full" data-act="loginDo" data-role="member">회원으로 시작</button>`,
           );
         },
         loginDo(d) {
@@ -2221,11 +2224,76 @@
           render();
           toast("환영해요, " + S.user.name);
         },
-        logout() {
-          S.user.role = "guest";
-          S.user.name = "";
+        async logout() {
+          if (sb) {
+            try {
+              await sb.auth.signOut();
+            } catch (e) {}
+          }
+          setGuest();
           save();
           render();
+          if (sb) {
+            authSkip(false);
+            S.auth = { mode: "in", email: "", msg: "", err: false, busy: false };
+            showAuth();
+          }
+        },
+        authMode() {
+          const em = $("#authEmail");
+          S.auth.email = em ? em.value : "";
+          S.auth.mode = S.auth.mode === "up" ? "in" : "up";
+          S.auth.msg = "";
+          showAuth();
+        },
+        authSkip() {
+          authSkip(true);
+          hideAuth();
+        },
+        async authSubmit() {
+          if (!sb || S.auth.busy) return;
+          const email = ($("#authEmail").value || "").trim(),
+            pw = $("#authPw").value || "",
+            up = S.auth.mode === "up",
+            nick = up ? ($("#authNick").value || "").trim() || "회원" : "";
+          S.auth.email = email;
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+            return setAuthMsg("이메일 주소를 확인해 주세요.", true);
+          if (pw.length < 6)
+            return setAuthMsg("비밀번호는 6자 이상이어야 해요.", true);
+          S.auth.busy = true;
+          setAuthMsg("잠시만요…", false);
+          try {
+            if (up) {
+              const { data, error } = await sb.auth.signUp({
+                email,
+                password: pw,
+                options: { data: { nickname: nick } },
+              });
+              if (error) throw error;
+              if (data.user && data.user.identities && !data.user.identities.length)
+                throw { message: "User already registered" };
+              if (!data.session) {
+                /* 이메일 인증을 켜 둔 프로젝트: 메일 확인 후 로그인 */
+                S.auth.mode = "in";
+                S.auth.busy = false;
+                S.auth.msg = "가입했어요! 메일로 보낸 인증 링크를 누른 뒤 로그인해 주세요.";
+                S.auth.err = false;
+                return showAuth();
+              }
+              await applySession(data.session);
+            } else {
+              const { data, error } = await sb.auth.signInWithPassword({
+                email,
+                password: pw,
+              });
+              if (error) throw error;
+              await applySession(data.session);
+            }
+          } catch (e) {
+            setAuthMsg(authErrText(e), true);
+          }
+          S.auth.busy = false;
         },
         sub(d) {
           S.sub = d.k;
@@ -2427,6 +2495,9 @@
           } else if (e.target.id === "barNo") {
             e.preventDefault();
             A.barLookup();
+          } else if (/^auth(Email|Nick|Pw)$/.test(e.target.id)) {
+            e.preventDefault();
+            A.authSubmit();
           }
         }
       });
@@ -2438,6 +2509,113 @@
         else if (id === "csvIn") importCsv(f);
         if (e.target.type === "file") e.target.value = "";
       });
+
+      /* ===== 로그인 (Supabase Auth) ===== */
+      let sb = null;
+      try {
+        if (
+          window.supabase &&
+          typeof SUPABASE_URL !== "undefined" &&
+          typeof SUPABASE_PUBLISHABLE_KEY !== "undefined"
+        )
+          sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+      } catch (e) {
+        sb = null;
+      }
+      S.auth = { mode: "in", email: "", msg: "", err: false, busy: false };
+      function authSkip(on) {
+        try {
+          on
+            ? sessionStorage.setItem("rc-skip", "1")
+            : sessionStorage.removeItem("rc-skip");
+        } catch (e) {}
+      }
+      function authSkipped() {
+        try {
+          return sessionStorage.getItem("rc-skip") === "1";
+        } catch (e) {
+          return false;
+        }
+      }
+      function setGuest() {
+        S.user.role = "guest";
+        S.user.name = "";
+        S.sub = "fav";
+      }
+      function authErrText(e) {
+        const m = String((e && e.message) || e || "");
+        if (/invalid login credentials/i.test(m))
+          return "이메일 또는 비밀번호가 맞지 않아요.";
+        if (/already registered|already been registered/i.test(m))
+          return "이미 가입된 이메일이에요. 로그인해 주세요.";
+        if (/email not confirmed/i.test(m))
+          return "메일로 보낸 인증 링크를 먼저 눌러 주세요.";
+        if (/rate limit|too many/i.test(m))
+          return "요청이 너무 많아요. 잠시 뒤에 다시 해 주세요.";
+        if (/password/i.test(m)) return "비밀번호는 6자 이상이어야 해요.";
+        if (/fetch|network/i.test(m)) return "서버에 연결하지 못했어요. 인터넷을 확인해 주세요.";
+        return "문제가 생겼어요: " + m;
+      }
+      function authHtml() {
+        const up = S.auth.mode === "up";
+        return `<div class="authBox">
+  <div class="authBrand"><span class="mark"><i style="background: var(--c-recycle)"></i><i style="background: var(--c-general)"></i><i style="background: var(--c-food)"></i><i style="background: var(--c-special)"></i></span>바른분리</div>
+  <h2 id="authTitle">${up ? "회원가입" : "로그인"}</h2>
+  <p class="sub">${up ? "가입하면 즐겨찾기·배출 기록·동네 알림을 쓸 수 있어요." : "로그인하면 즐겨찾기와 배출 기록을 관리할 수 있어요."}</p>
+  <label class="f" for="authEmail">이메일<input id="authEmail" type="email" autocomplete="email" placeholder="example@email.com" value="${esc(S.auth.email)}"></label>
+  ${up ? `<label class="f" for="authNick">닉네임<input id="authNick" maxlength="12" autocomplete="nickname" placeholder="예: 서현"></label>` : ""}
+  <label class="f" for="authPw">비밀번호<input id="authPw" type="password" autocomplete="${up ? "new-password" : "current-password"}" placeholder="6자 이상"></label>
+  <p class="authMsg ${S.auth.err ? "err" : ""}" id="authMsg" role="alert">${esc(S.auth.msg)}</p>
+  <button type="button" class="btn full" data-act="authSubmit">${up ? "가입하기" : "로그인"}</button>
+  <button type="button" class="btn ghost full" data-act="authMode">${up ? "이미 계정이 있어요 · 로그인" : "처음이에요 · 회원가입"}</button>
+  <button type="button" class="linkbtn" data-act="authSkip">로그인 없이 둘러보기</button>
+</div>`;
+      }
+      function showAuth() {
+        const el = $("#authScreen");
+        el.innerHTML = authHtml();
+        el.classList.remove("hidden");
+        const f = $(S.auth.email ? "#authPw" : "#authEmail");
+        if (f) f.focus();
+      }
+      function hideAuth() {
+        $("#authScreen").classList.add("hidden");
+      }
+      function setAuthMsg(msg, err) {
+        S.auth.msg = msg;
+        S.auth.err = !!err;
+        const m = $("#authMsg");
+        if (m) {
+          m.textContent = msg;
+          m.classList.toggle("err", !!err);
+        }
+      }
+      /* 로그인 세션 → 앱 상태 (닉네임·권한은 profiles 테이블에서 읽어요) */
+      async function applySession(session, quiet) {
+        const u = session.user;
+        let name = (u.user_metadata && u.user_metadata.nickname) || "회원",
+          role = "member";
+        try {
+          const { data } = await sb
+            .from("profiles")
+            .select("nickname, role")
+            .eq("id", u.id)
+            .maybeSingle();
+          if (data) {
+            name = data.nickname || name;
+            role = data.role === "admin" ? "admin" : "member";
+          }
+        } catch (e) {}
+        S.user.role = role;
+        S.user.name = name;
+        S.sub = "fav";
+        save();
+        hideAuth();
+        if (!quiet) {
+          render();
+          toast("환영해요, " + name);
+        }
+      }
 
       /* ===== 시작 ===== */
       (async function init() {
@@ -2453,6 +2631,23 @@
         if (q) S.queue = q;
         if (!S.db.regions.some((r) => r.id === S.user.regionId))
           S.user.regionId = S.db.regions[0].id;
+        if (sb) {
+          /* 저장돼 있던 로그인 상태는 믿지 않고, Supabase 세션으로 다시 확인 */
+          setGuest();
+          try {
+            const { data } = await sb.auth.getSession();
+            if (data && data.session) await applySession(data.session, true);
+            else if (!authSkipped()) showAuth();
+          } catch (e) {
+            if (!authSkipped()) showAuth();
+          }
+          sb.auth.onAuthStateChange((ev) => {
+            if (ev === "SIGNED_OUT" && S.user.role !== "guest") {
+              setGuest();
+              render();
+            }
+          });
+        }
         render();
       })();
     </script>

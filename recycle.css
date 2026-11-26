@@ -774,3 +774,56 @@ footer.foot p + p {
     transition: none !important;
   }
 }
+
+/* 로그인 화면 */
+.authScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 16px;
+  overflow: auto;
+}
+.authScreen.hidden {
+  display: none;
+}
+.authBox {
+  width: 100%;
+  max-width: 380px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.authBox h2 {
+  font-size: 22px;
+}
+.authBrand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  color: var(--brand);
+}
+.authMsg {
+  min-height: 20px;
+  font-size: 13px;
+  color: var(--brand);
+}
+.authMsg.err {
+  color: var(--danger);
+}
+.linkbtn {
+  background: none;
+  border: 0;
+  color: var(--sub);
+  text-decoration: underline;
+  padding: 8px;
+  font-size: 14px;
+}
